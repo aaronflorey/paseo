@@ -1,7 +1,7 @@
 import type { OpenCodeServerAcquisition, OpenCodeServerManagerLike } from "./server-manager.js";
 
 export interface TestOpenCodeServerAcquisition {
-  kind: "current" | "new" | "dedicated" | "existing";
+  kind: "current" | "new" | "existing";
   env?: Record<string, string>;
   url?: string;
   released: boolean;
@@ -17,10 +17,6 @@ export class TestOpenCodeServerManager implements OpenCodeServerManagerLike {
 
   async acquireNew(): Promise<OpenCodeServerAcquisition> {
     return this.recordAcquisition({ kind: "new" });
-  }
-
-  async acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition> {
-    return this.recordAcquisition({ kind: "dedicated", env });
   }
 
   acquireExisting(url: string): OpenCodeServerAcquisition | null {

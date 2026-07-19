@@ -173,6 +173,11 @@ export interface AgentCapabilityFlags {
   supportsDynamicModes: boolean;
   supportsMcpServers: boolean;
   supportsNativePaseoTools?: boolean;
+  /**
+   * Provider keeps the Paseo MCP transport but routes calls to a runtime tool
+   * catalog using provider session identity.
+   */
+  supportsSessionRoutedPaseoTools?: boolean;
   supportsReasoningStream: boolean;
   supportsToolInvocations: boolean;
   supportsRewindConversation?: boolean;

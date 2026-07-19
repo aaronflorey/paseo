@@ -1,7 +1,7 @@
 import type { AgentSessionConfig, McpServerConfig } from "./agent-sdk-types.js";
 
-const PASEO_MCP_SERVER_NAME = "paseo";
-const PASEO_MCP_PATHNAME = "/mcp/agents";
+export const PASEO_MCP_SERVER_NAME = "paseo";
+export const PASEO_MCP_PATHNAME = "/mcp/agents";
 
 export function stripInternalPaseoMcpServer(config: AgentSessionConfig): AgentSessionConfig {
   const mcpServers = config.mcpServers;
@@ -57,7 +57,9 @@ export function withRuntimePaseoMcpServer(params: {
   };
 }
 
-function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
+export function isInternalPaseoMcpServer(
+  config: McpServerConfig,
+): config is Extract<McpServerConfig, { type: "http" | "sse" }> {
   if (config.type !== "http" && config.type !== "sse") {
     return false;
   }

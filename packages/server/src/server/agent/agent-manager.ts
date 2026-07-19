@@ -1045,7 +1045,11 @@ export class AgentManager {
       provider: storedConfig.provider,
     });
     const launchContext = await this.buildLaunchContext(resolvedAgentId, client, options?.env);
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(
+      launchConfig,
+      launchContext,
+      client,
+    );
     const createOptions = this.buildCreateSessionOptions(options);
     const session = await client.createSession(providerLaunchConfig, launchContext, createOptions);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
@@ -1121,7 +1125,11 @@ export class AgentManager {
       );
     }
     const launchContext = await this.buildLaunchContext(resolvedAgentId, client);
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(
+      launchConfig,
+      launchContext,
+      client,
+    );
     const session = await client.resumeSession(handle, providerLaunchConfig, launchContext);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
@@ -1163,7 +1171,11 @@ export class AgentManager {
       resolvedAgentId,
     );
     const launchContext = await this.buildLaunchContext(resolvedAgentId, client);
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(
+      launchConfig,
+      launchContext,
+      client,
+    );
     const imported = await client.importSession(
       {
         providerHandleId: input.providerHandleId,
@@ -1244,7 +1256,11 @@ export class AgentManager {
     } as AgentSessionConfig;
     const { storedConfig, launchConfig } = await this.prepareSessionConfig(refreshConfig, agentId);
     const launchContext = await this.buildLaunchContext(agentId, client);
-    const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
+    const providerLaunchConfig = this.resolveProviderLaunchConfig(
+      launchConfig,
+      launchContext,
+      client,
+    );
 
     const session = handle
       ? await client.resumeSession(handle, providerLaunchConfig, launchContext)
@@ -4163,7 +4179,8 @@ export class AgentManager {
     };
     if (
       this.paseoToolsEnabled &&
-      client.capabilities.supportsNativePaseoTools &&
+      (client.capabilities.supportsNativePaseoTools ||
+        client.capabilities.supportsSessionRoutedPaseoTools) &&
       this.paseoToolCatalogFactory
     ) {
       context.paseoTools = await this.paseoToolCatalogFactory({ callerAgentId: agentId });
@@ -4174,8 +4191,11 @@ export class AgentManager {
   private resolveProviderLaunchConfig(
     launchConfig: AgentSessionConfig,
     launchContext: AgentLaunchContext,
+    client: AgentClient,
   ): AgentSessionConfig {
-    return launchContext.paseoTools ? stripInternalPaseoMcpServer(launchConfig) : launchConfig;
+    return launchContext.paseoTools && client.capabilities.supportsNativePaseoTools
+      ? stripInternalPaseoMcpServer(launchConfig)
+      : launchConfig;
   }
 
   private async requireAvailableClient(options: { provider: AgentProvider }): Promise<AgentClient> {

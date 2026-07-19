@@ -27,7 +27,6 @@ export interface OpenCodeServerAcquisition {
 export interface OpenCodeServerManagerLike {
   acquireCurrent(): Promise<OpenCodeServerAcquisition>;
   acquireNew(): Promise<OpenCodeServerAcquisition>;
-  acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition>;
   acquireExisting(url: string): OpenCodeServerAcquisition | null;
   shutdown(): Promise<void>;
 }
@@ -37,7 +36,6 @@ export interface OpenCodeServerGeneration {
   port: number;
   url: string;
   refCount: number;
-  retired: boolean;
   ready: Promise<void>;
   managedProcessId?: string;
   managedProcessRecord?: Promise<{ id: string } | null>;
@@ -59,6 +57,7 @@ export interface OpenCodeServerManagerOptions {
   portAllocator?: OpenCodePortAllocator;
   resolveCommandPrefix?: OpenCodeCommandPrefixResolver;
   resolveHomeDir?: () => string;
+  resolveSharedLaunchEnv?: () => Promise<Record<string, string>>;
   spawnServerProcess?: OpenCodeServerProcessSpawner;
 }
 
@@ -66,9 +65,10 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private static instance: OpenCodeServerManager | null = null;
   private static exitHandlerRegistered = false;
   private currentServer: OpenCodeServerGeneration | null = null;
-  private retiredServers = new Set<OpenCodeServerGeneration>();
+  private readonly startingServers = new Set<OpenCodeServerGeneration>();
   private startPromise: Promise<OpenCodeServerGeneration> | null = null;
   private newServerPromise: Promise<OpenCodeServerGeneration> | null = null;
+  private shuttingDown = false;
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly runtimeSettingsKey: string;
@@ -77,6 +77,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private readonly portAllocator: OpenCodePortAllocator;
   private readonly resolveCommandPrefix: OpenCodeCommandPrefixResolver;
   private readonly resolveHomeDir: () => string;
+  private readonly resolveSharedLaunchEnv?: () => Promise<Record<string, string>>;
   private readonly spawnServerProcess: OpenCodeServerProcessSpawner;
 
   constructor(options: OpenCodeServerManagerOptions) {
@@ -90,6 +91,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       options.resolveCommandPrefix ??
       (() => resolveProviderCommandPrefix(this.runtimeSettings?.command, resolveOpenCodeBinary));
     this.resolveHomeDir = options.resolveHomeDir ?? resolveOpenCodeHomeDir;
+    this.resolveSharedLaunchEnv = options.resolveSharedLaunchEnv;
     this.spawnServerProcess = options.spawnServerProcess ?? spawnProcess;
   }
 
@@ -144,31 +146,14 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     return this.acquireServer(server);
   }
 
-  async acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition> {
-    const server = await this.startServer(env);
-    server.retired = true;
-    this.retiredServers.add(server);
-    const acquisition = this.acquireServer(server);
-    try {
-      await server.ready;
-      return acquisition;
-    } catch (error) {
-      await acquisition.release();
-      throw error;
-    }
-  }
-
   acquireExisting(url: string): OpenCodeServerAcquisition | null {
     const server = this.findLiveServerByUrl(url);
     return server ? this.acquireServer(server) : null;
   }
 
   private findLiveServerByUrl(url: string): OpenCodeServerGeneration | null {
-    const servers = [
-      ...(this.currentServer ? [this.currentServer] : []),
-      ...Array.from(this.retiredServers),
-    ];
-    return servers.find((server) => server.url === url && this.isServerLive(server)) ?? null;
+    const server = this.currentServer;
+    return server?.url === url && this.isServerLive(server) ? server : null;
   }
 
   private isServerLive(server: OpenCodeServerGeneration): boolean {
@@ -202,13 +187,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
 
     if (this.currentServer === server) {
       this.currentServer = null;
-      server.retired = true;
     }
-    if (!server.retired) {
-      return;
-    }
-
-    this.retiredServers.delete(server);
     await this.killServer(server);
   }
 
@@ -219,11 +198,20 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
 
     this.newServerPromise = Promise.resolve()
       .then(async () => {
-        await this.rotateCurrentServer();
-        const server = await this.startServer();
-        if (!server.retired) {
-          this.currentServer = server;
+        if (this.startPromise) {
+          const starting = await this.startPromise;
+          await starting.ready;
+          return starting;
         }
+        const active = this.currentServer;
+        if (active && active.refCount > 0 && this.isServerLive(active)) {
+          return active;
+        }
+        if (active) {
+          await this.rotateCurrentServer();
+        }
+        const server = await this.startServer();
+        this.currentServer = server;
         await server.ready;
         return server;
       })
@@ -250,9 +238,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     }
 
     this.startPromise = this.startServer().then((server) => {
-      if (!server.retired) {
-        this.currentServer = server;
-      }
+      this.currentServer = server;
       return server;
     });
     const currentStart = this.startPromise;
@@ -268,21 +254,15 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private async rotateCurrentServer(): Promise<void> {
     const existing = this.currentServer;
     if (existing) {
-      existing.retired = true;
-      this.retiredServers.add(existing);
       this.currentServer = null;
-      await this.cleanupRetiredServers();
-    }
-    if (this.startPromise) {
-      const pending = await this.startPromise;
-      pending.retired = true;
-      this.retiredServers.add(pending);
-      this.currentServer = null;
-      await this.cleanupRetiredServers();
+      await this.killServer(existing);
     }
   }
 
-  private async startServer(launchEnv?: Record<string, string>): Promise<OpenCodeServerGeneration> {
+  private async startServer(): Promise<OpenCodeServerGeneration> {
+    if (this.shuttingDown) {
+      throw new Error("OpenCode server manager is shutting down");
+    }
     const port = await this.portAllocator();
     const url = `http://127.0.0.1:${port}`;
     const launchPrefix = await this.resolveCommandPrefix();
@@ -292,6 +272,10 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     // index the entire home tree.
     const serverCwd = this.resolveHomeDir();
     mkdirSync(serverCwd, { recursive: true });
+    const sharedLaunchEnv = await this.resolveSharedLaunchEnv?.();
+    if (this.shuttingDown) {
+      throw new Error("OpenCode server manager is shutting down");
+    }
 
     const serverProcess = this.spawnServerProcess(launchPrefix.command, serverArgs, {
       cwd: serverCwd,
@@ -299,7 +283,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       stdio: ["ignore", "pipe", "pipe"],
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
-        overlays: [launchEnv],
+        overlays: [sharedLaunchEnv],
       }),
     });
     const managedProcessRecord = this.recordManagedServerProcess({
@@ -313,10 +297,10 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       port,
       url,
       refCount: 0,
-      retired: false,
       ready: Promise.resolve(),
       managedProcessRecord,
     };
+    this.startingServers.add(server);
     void managedProcessRecord.then((record) => {
       if (record && server.managedProcessRecord === managedProcessRecord) {
         server.managedProcessId = record.id;
@@ -388,6 +372,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       });
 
       serverProcess.on("exit", (code) => {
+        this.startingServers.delete(server);
         this.removeManagedServerRecord(server);
         if (!started) {
           failStartup(
@@ -397,11 +382,6 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         if (this.currentServer?.process === serverProcess) {
           this.currentServer = null;
         }
-        for (const retired of Array.from(this.retiredServers)) {
-          if (retired.process === serverProcess) {
-            this.retiredServers.delete(retired);
-          }
-        }
       });
     });
 
@@ -410,32 +390,27 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       if (this.currentServer === server) {
         this.currentServer = null;
       }
-      this.retiredServers.delete(server);
       throw error;
     });
+    void server.ready.then(
+      () => this.startingServers.delete(server),
+      () => this.startingServers.delete(server),
+    );
 
     return server;
   }
 
   async shutdown(): Promise<void> {
-    const servers = [
+    this.shuttingDown = true;
+    const startingServer = this.startPromise ? await this.startPromise.catch(() => null) : null;
+    const servers = new Set([
       ...(this.currentServer ? [this.currentServer] : []),
-      ...Array.from(this.retiredServers),
-    ];
-    await Promise.all(servers.map((server) => this.killServer(server)));
+      ...(startingServer ? [startingServer] : []),
+      ...Array.from(this.startingServers),
+    ]);
+    await Promise.all(Array.from(servers, (server) => this.killServer(server)));
     this.currentServer = null;
-    this.retiredServers.clear();
-  }
-
-  private async cleanupRetiredServers(): Promise<void> {
-    const cleanup: Promise<void>[] = [];
-    for (const server of Array.from(this.retiredServers)) {
-      if (server.refCount === 0) {
-        this.retiredServers.delete(server);
-        cleanup.push(this.killServer(server));
-      }
-    }
-    await Promise.all(cleanup);
+    this.startingServers.clear();
   }
 
   private async killServer(server: OpenCodeServerGeneration): Promise<void> {

@@ -27,36 +27,38 @@ afterEach(() => {
 });
 
 describe("OpenCodeServerManager generations", () => {
-  test("rotation creates a new current server without killing a referenced old server", async () => {
+  test("forced refresh reuses a referenced current server", async () => {
     const { manager, runtime } = createTestManager([4101, 4102]);
 
     const oldAcquisition = await manager.acquireCurrent();
     const newAcquisition = await manager.acquireNew();
 
     expect(oldAcquisition.server.url).toBe("http://127.0.0.1:4101");
-    expect(newAcquisition.server.url).toBe("http://127.0.0.1:4102");
+    expect(newAcquisition.server.url).toBe("http://127.0.0.1:4101");
+    expect(runtime.launchedPorts).toEqual([4101]);
     expect(runtime.terminatedPorts).toEqual([]);
 
     await newAcquisition.release();
     await oldAcquisition.release();
 
-    expect(runtime.terminatedPorts).toEqual([4102, 4101]);
+    expect(runtime.terminatedPorts).toEqual([4101]);
   });
 
-  test("new acquisitions after rotation use the new server", async () => {
+  test("forced refresh replaces an idle server before starting the next one", async () => {
     const { manager, runtime } = createTestManager([4201, 4202]);
 
     const oldAcquisition = await manager.acquireCurrent();
+    await oldAcquisition.release();
     const rotatedAcquisition = await manager.acquireNew();
     const nextAcquisition = await manager.acquireCurrent();
 
     expect(nextAcquisition.server.url).toBe("http://127.0.0.1:4202");
-    expect(runtime.terminatedPorts).toEqual([]);
+    expect(runtime.terminatedPorts).toEqual([4201]);
 
     await rotatedAcquisition.release();
-    expect(runtime.terminatedPorts).toEqual([]);
+    expect(runtime.terminatedPorts).toEqual([4201]);
     await nextAcquisition.release();
-    await oldAcquisition.release();
+    expect(runtime.terminatedPorts).toEqual([4201, 4202]);
   });
 
   test("concurrent new-server acquisitions share one fresh generation", async () => {
@@ -82,16 +84,15 @@ describe("OpenCodeServerManager generations", () => {
     const { manager, runtime } = createTestManager([4301, 4302]);
 
     const oldAcquisition = await manager.acquireCurrent();
+    await oldAcquisition.release();
+    await oldAcquisition.release();
     const newAcquisition = await manager.acquireNew();
     await newAcquisition.release();
 
-    await oldAcquisition.release();
-    await oldAcquisition.release();
-
-    expect(runtime.terminatedPorts).toEqual([4302, 4301]);
+    expect(runtime.terminatedPorts).toEqual([4301, 4302]);
   });
 
-  test("shutdown kills current and retired servers", async () => {
+  test("shutdown kills the shared current server", async () => {
     const { manager, runtime } = createTestManager([4401, 4402]);
 
     await manager.acquireCurrent();
@@ -99,7 +100,7 @@ describe("OpenCodeServerManager generations", () => {
 
     await manager.shutdown();
 
-    expect(runtime.terminatedPorts).toEqual([4402, 4401]);
+    expect(runtime.terminatedPorts).toEqual([4401]);
   });
 
   test("shutdown still signals a process after an earlier kill signal if it has not exited", async () => {
@@ -141,38 +142,32 @@ describe("OpenCodeServerManager generations", () => {
     expect(await runtime.managedProcesses.list()).toEqual([]);
   });
 
-  test("dedicated server startup is protected from retired cleanup", async () => {
+  test("shutdown catches a replacement server that is still starting", async () => {
     const { manager, runtime } = createTestManager([4473, 4474], { autoAnnounce: false });
-
-    const currentStart = manager.acquireCurrent();
+    const initialStart = manager.acquireCurrent();
     await runtime.settle();
     runtime.processForPort(4473).announceListening();
-    const currentAcquisition = await currentStart;
+    const initial = await initialStart;
+    await initial.release();
 
-    const dedicatedStart = manager.acquireDedicated({ TEST_ENV: "custom" });
-    await runtime.settle();
+    const replacement = manager.acquireNew();
+    await vi.waitFor(() => expect(runtime.launchedPorts).toContain(4474));
+    await manager.shutdown();
 
-    await currentAcquisition.release();
-    expect(runtime.terminatedPorts).toEqual([4473]);
-
-    runtime.processForPort(4474).announceListening();
-    const dedicatedAcquisition = await dedicatedStart;
-
-    expect(dedicatedAcquisition.server.url).toBe("http://127.0.0.1:4474");
-
-    await dedicatedAcquisition.release();
+    await expect(replacement).rejects.toThrow("OpenCode server exited with code null");
     expect(runtime.terminatedPorts).toEqual([4473, 4474]);
+    expect(await runtime.managedProcesses.list()).toEqual([]);
   });
 
-  test("acquireExisting keeps a retired dedicated server alive until every reference releases", async () => {
+  test("acquireExisting returns another reference to the shared server", async () => {
     const { manager, runtime } = createTestManager([4475]);
 
-    const dedicatedAcquisition = await manager.acquireDedicated({ PASEO_AGENT_ID: "parent" });
-    const existingAcquisition = manager.acquireExisting(dedicatedAcquisition.server.url);
+    const currentAcquisition = await manager.acquireCurrent();
+    const existingAcquisition = manager.acquireExisting(currentAcquisition.server.url);
 
     expect(existingAcquisition?.server.url).toBe("http://127.0.0.1:4475");
 
-    await dedicatedAcquisition.release();
+    await currentAcquisition.release();
     expect(runtime.terminatedPorts).toEqual([]);
 
     await existingAcquisition?.release();
@@ -182,27 +177,28 @@ describe("OpenCodeServerManager generations", () => {
   test("acquireExisting returns null for unknown or dead server urls", async () => {
     const { manager, runtime } = createTestManager([4476]);
 
-    const acquisition = await manager.acquireDedicated({ PASEO_AGENT_ID: "parent" });
+    const acquisition = await manager.acquireCurrent();
     const url = acquisition.server.url;
 
     expect(manager.acquireExisting("http://127.0.0.1:9999")).toBe(null);
 
-    await acquisition.release();
-    expect(runtime.terminatedPorts).toEqual([4476]);
+    runtime.processForPort(4476).exitNormally();
+    await runtime.settle();
     expect(manager.acquireExisting(url)).toBe(null);
+    await acquisition.release();
   });
 
-  test("repeated rotations leave zero unreferenced retired servers", async () => {
+  test("repeated idle replacements terminate every generation", async () => {
     const { manager, runtime } = createTestManager([4501, 4502, 4503]);
 
     const firstAcquisition = await manager.acquireCurrent();
+    await firstAcquisition.release();
     const secondAcquisition = await manager.acquireNew();
     await secondAcquisition.release();
     const thirdAcquisition = await manager.acquireNew();
     await thirdAcquisition.release();
-    await firstAcquisition.release();
 
-    expect(runtime.terminatedPorts).toEqual([4502, 4503, 4501]);
+    expect(runtime.terminatedPorts).toEqual([4501, 4502, 4503]);
   });
 
   test("final release detaches the terminating generation before a concurrent acquire", async () => {
@@ -278,6 +274,21 @@ describe("OpenCodeServerManager managed process ledger", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  test("applies shared launch environment to the helper process", async () => {
+    const { manager, runtime } = createTestManager([4604], {
+      sharedLaunchEnv: { PASEO_OPENCODE_SESSION_CONTEXT_URL: "http://127.0.0.1:9999/context" },
+    });
+
+    const acquisition = await manager.acquireCurrent();
+
+    expect(runtime.spawnCalls[0]?.options.envOverlay).toMatchObject({
+      PASEO_OPENCODE_SESSION_CONTEXT_URL: "http://127.0.0.1:9999/context",
+    });
+
+    await acquisition.release();
+    await manager.shutdown();
+  });
 });
 
 describe.runIf(process.platform === "win32")(
@@ -297,19 +308,22 @@ describe.runIf(process.platform === "win32")(
         logger: createTestLogger(),
         managedProcesses,
         resolveHomeDir: () => opencodeHomeDir,
+        runtimeSettings: {
+          env: {
+            OPENCODE_AUTH_CONTENT: "{}",
+            OPENCODE_DISABLE_AUTOUPDATE: "1",
+            OPENCODE_DISABLE_AUTOCOMPACT: "1",
+            OPENCODE_DISABLE_MODELS_FETCH: "1",
+            OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+            OPENCODE_PURE: "1",
+            OPENCODE_TEST_HOME: path.join(tempDir, "test-home"),
+          },
+        },
       });
       let acquiredPort: number | null = null;
 
       try {
-        const acquisition = await manager.acquireDedicated({
-          OPENCODE_AUTH_CONTENT: "{}",
-          OPENCODE_DISABLE_AUTOUPDATE: "1",
-          OPENCODE_DISABLE_AUTOCOMPACT: "1",
-          OPENCODE_DISABLE_MODELS_FETCH: "1",
-          OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-          OPENCODE_PURE: "1",
-          OPENCODE_TEST_HOME: path.join(tempDir, "test-home"),
-        });
+        const acquisition = await manager.acquireCurrent();
         acquiredPort = acquisition.server.port;
 
         const records = await managedProcesses.list();
@@ -334,7 +348,11 @@ describe.runIf(process.platform === "win32")(
 
 function createTestManager(
   ports: number[],
-  options: { autoAnnounce?: boolean; opencodeHomeDir?: string } = {},
+  options: {
+    autoAnnounce?: boolean;
+    opencodeHomeDir?: string;
+    sharedLaunchEnv?: Record<string, string>;
+  } = {},
 ): {
   manager: OpenCodeServerManager;
   runtime: FakeOpenCodeServerRuntime;
@@ -350,6 +368,9 @@ function createTestManager(
       portAllocator: runtime.allocatePort,
       resolveCommandPrefix: runtime.resolveCommandPrefix,
       ...(opencodeHomeDir ? { resolveHomeDir: () => opencodeHomeDir } : {}),
+      ...(options.sharedLaunchEnv
+        ? { resolveSharedLaunchEnv: async () => options.sharedLaunchEnv ?? {} }
+        : {}),
       spawnServerProcess: runtime.spawnServerProcess,
       terminateProcess: runtime.terminateProcess,
     }),

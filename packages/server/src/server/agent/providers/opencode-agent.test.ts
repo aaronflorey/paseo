@@ -16,6 +16,7 @@ import {
   TestOpenCodeClient,
   TestOpenCodeHarness,
 } from "./opencode/test-utils/test-opencode-harness.js";
+import { openCodeSessionContextRegistry } from "./opencode/session-context.js";
 import type {
   AgentSessionConfig,
   AgentStreamEvent,
@@ -1036,7 +1037,7 @@ describe("OpenCode adapter startTurn error handling", () => {
         mcpServers: {
           paseo: {
             type: "http",
-            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=test-agent",
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=opencode-shared&sessionRouting=opencode-session",
           },
         },
       });
@@ -1049,7 +1050,7 @@ describe("OpenCode adapter startTurn error handling", () => {
           name: "paseo",
           config: {
             type: "remote",
-            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=test-agent",
+            url: "http://127.0.0.1:6767/mcp/agents?callerAgentId=opencode-shared&sessionRouting=opencode-session",
             enabled: true,
           },
         },
@@ -1057,6 +1058,51 @@ describe("OpenCode adapter startTurn error handling", () => {
       expect(openCodeClient.calls.mcpConnect).toEqual([]);
 
       await session.close();
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects conflicting project-scoped MCP configs on the shared server", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const firstClient = new TestOpenCodeClient();
+    const secondClient = new TestOpenCodeClient();
+    firstClient.sessionCreateResponse = { data: { id: "session-mcp-first" } };
+    firstClient.sessionPromptAsyncEvents = [
+      { type: "session.idle", properties: { sessionID: "session-mcp-first" } },
+    ];
+    secondClient.sessionCreateResponse = { data: { id: "session-mcp-second" } };
+    runtime.enqueueClient(firstClient);
+    runtime.enqueueClient(secondClient);
+    const cwd = tmpCwd();
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+
+    try {
+      const first = await client.createSession({
+        provider: "opencode",
+        cwd,
+        mcpServers: {
+          custom: { type: "http", url: "http://127.0.0.1:7001/mcp" },
+        },
+      });
+      const second = await client.createSession({
+        provider: "opencode",
+        cwd,
+        mcpServers: {
+          custom: { type: "http", url: "http://127.0.0.1:7002/mcp" },
+        },
+      });
+
+      await collectTurnEvents(streamSession(first, "first"));
+      await expect(collectTurnEvents(streamSession(second, "second"))).rejects.toThrow(
+        "already has a different project-scoped configuration",
+      );
+
+      await second.close();
+      await first.close();
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -1897,7 +1943,7 @@ describe("OpenCode adapter startTurn error handling", () => {
 });
 
 describe("OpenCodeAgentClient env", () => {
-  test("passes launch-context env to env-specific server acquisition", async () => {
+  test("binds launch-context env to the OpenCode session on the shared server", async () => {
     const runtime = new TestOpenCodeHarness();
     const openCodeClient = new TestOpenCodeClient();
     runtime.enqueueClient(openCodeClient);
@@ -1914,19 +1960,26 @@ describe("OpenCodeAgentClient env", () => {
           cwd,
         },
         {
+          agentId: "agent-env-test",
           env: {
             CHUNK14_PROBE: "expected",
+            PASEO_AGENT_ID: "agent-env-test",
           },
         },
       );
-      await session.close();
 
       expect(runtime.acquisitions[0]).toMatchObject({
-        kind: "dedicated",
+        kind: "current",
+      });
+      expect(openCodeSessionContextRegistry.resolve(session.id!)).toMatchObject({
         env: {
           CHUNK14_PROBE: "expected",
+          PASEO_AGENT_ID: "agent-env-test",
         },
       });
+
+      await session.close();
+      expect(openCodeSessionContextRegistry.resolve(session.id!)).toBeUndefined();
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -2359,6 +2412,11 @@ describe("OpenCode provider subagent contract", () => {
     });
     await Promise.resolve();
     await Promise.resolve();
+    await vi.waitFor(() =>
+      expect(openCodeSessionContextRegistry.resolve("ses_child_external")?.env.PASEO_AGENT_ID).toBe(
+        "parent-agent",
+      ),
+    );
 
     const child = await client.resumeSession(
       {
@@ -2430,6 +2488,11 @@ describe("OpenCode provider subagent contract", () => {
     });
     await Promise.resolve();
     await Promise.resolve();
+    await vi.waitFor(() =>
+      expect(openCodeSessionContextRegistry.resolve("ses_child_registry")?.env.PASEO_AGENT_ID).toBe(
+        "parent-agent",
+      ),
+    );
 
     const child = await client.resumeSession(
       {
@@ -2441,8 +2504,15 @@ describe("OpenCode provider subagent contract", () => {
       undefined,
       { env: { PASEO_AGENT_ID: "child-agent" } },
     );
+    expect(openCodeSessionContextRegistry.resolve("ses_child_registry")?.env.PASEO_AGENT_ID).toBe(
+      "child-agent",
+    );
     await child.close();
+    expect(openCodeSessionContextRegistry.resolve("ses_child_registry")?.env.PASEO_AGENT_ID).toBe(
+      "parent-agent",
+    );
     await parent.close();
+    expect(openCodeSessionContextRegistry.resolve("ses_child_registry")).toBeUndefined();
 
     expect(events).toContainEqual({
       type: "provider_subagent",
@@ -2455,7 +2525,7 @@ describe("OpenCode provider subagent contract", () => {
       },
     });
     expect(runtime.acquisitions).toEqual([
-      { kind: "dedicated", env: { PASEO_AGENT_ID: "parent-agent" }, releaseCount: 1 },
+      { kind: "current", releaseCount: 1 },
       { kind: "existing", url: runtime.server.url, releaseCount: 1 },
     ]);
     expect(runtime.clientCreations).toEqual([

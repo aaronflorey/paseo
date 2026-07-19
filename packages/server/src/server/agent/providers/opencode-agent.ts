@@ -53,6 +53,7 @@ import {
   type ToolCallTimelineItem,
 } from "../agent-sdk-types.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
+import { isInternalPaseoMcpServer, PASEO_MCP_SERVER_NAME } from "../runtime-mcp-config.js";
 import {
   isDefaultAgentCreateConfigUnattended,
   resolveDefaultAgentCreateConfig,
@@ -67,10 +68,22 @@ import { withTimeout } from "../../../utils/promise-timeout.js";
 import { execCommand } from "../../../utils/spawn.js";
 import { mapOpencodeToolCall } from "./opencode/tool-call-mapper.js";
 import {
+  openCodeGlobalEventHub,
+  type OpenCodeGlobalEventSubscription,
+} from "./opencode/global-event-hub.js";
+import {
   OpenCodeServerManager,
   type OpenCodeServerManagerLike,
 } from "./opencode/server-manager.js";
 import { resolveOpenCodeHomeDir } from "./opencode/paths.js";
+import { resolveOpenCodeSharedServerEnv } from "./opencode/session-routing-plugin.js";
+import {
+  openCodeSessionContextBridge,
+  openCodeSessionContextRegistry,
+  OPENCODE_SESSION_ROUTING_MODE,
+  OPENCODE_SHARED_MCP_CALLER_ID,
+  type OpenCodeSessionContext,
+} from "./opencode/session-context.js";
 import {
   formatProviderDiagnostic,
   formatProviderDiagnosticError,
@@ -91,6 +104,7 @@ const OPENCODE_CAPABILITIES: AgentCapabilityFlags = {
   supportsSessionListing: true,
   supportsDynamicModes: true,
   supportsMcpServers: true,
+  supportsSessionRoutedPaseoTools: true,
   supportsReasoningStream: true,
   supportsToolInvocations: true,
   supportsRewindConversation: false,
@@ -105,8 +119,21 @@ const OPENCODE_PERSISTED_SESSION_LIMIT = 200;
 const OPENCODE_PENDING_ABORT_START_TIMEOUT_MS = 10_000;
 const OPENCODE_CHILD_SESSION_HYDRATION_LIMIT = 100;
 const OPENCODE_CHILD_SESSION_SERVER_REGISTRY_LIMIT = 500;
+const OPENCODE_UNRELATED_SESSION_REGISTRY_LIMIT = 500;
 const OPENCODE_PERMISSION_ACTION_ALLOW_ONCE = "allow_once";
 const OPENCODE_PERMISSION_ACTION_ALLOW_ALWAYS = "allow_always";
+
+function toOpenCodeSessionContext(
+  launchContext: AgentLaunchContext | undefined,
+): OpenCodeSessionContext | undefined {
+  if (!launchContext) {
+    return undefined;
+  }
+  return {
+    env: launchContext.env ?? {},
+    paseoTools: launchContext.paseoTools,
+  };
+}
 
 // OpenCode child sessions run on the server process that spawned them. Adoption
 // resumes must attach to that same helper server to receive live global events.
@@ -282,6 +309,10 @@ type OpenCodeMcpConfig =
     };
 
 const MCP_ALREADY_PRESENT_ERROR_TOKENS = ["already", "exists", "connected"] as const;
+const openCodeProjectMcpConfigs = new Map<
+  string,
+  { serializedConfig: string; ready: Promise<void> }
+>();
 const OPENCODE_PROVIDER_LIST_TIMEOUT_MS = 30_000;
 const OPENCODE_METADATA_CONCURRENCY = 4;
 const openCodeMetadataLimit = pLimit(OPENCODE_METADATA_CONCURRENCY);
@@ -401,6 +432,33 @@ function toOpenCodeMcpConfig(config: McpServerConfig): OpenCodeMcpConfig {
     ...(config.headers ? { headers: config.headers } : {}),
     enabled: true,
   };
+}
+
+function normalizeOpenCodeMcpServerConfig(name: string, config: McpServerConfig): McpServerConfig {
+  if (name !== PASEO_MCP_SERVER_NAME || !isInternalPaseoMcpServer(config)) {
+    return config;
+  }
+  try {
+    const url = new URL(config.url);
+    url.searchParams.set("callerAgentId", OPENCODE_SHARED_MCP_CALLER_ID);
+    url.searchParams.set("sessionRouting", OPENCODE_SESSION_ROUTING_MODE);
+    return { ...config, url: url.toString() };
+  } catch {
+    return config;
+  }
+}
+
+function serializeOpenCodeMcpConfig(config: OpenCodeMcpConfig): string {
+  return JSON.stringify(config, (_key, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
+  });
 }
 
 type TerminalTurnEvent = Extract<
@@ -1277,6 +1335,14 @@ export class OpenCodeAgentClient implements AgentClient {
       OpenCodeServerManager.getInstance(this.logger, runtimeSettings, {
         managedProcesses: deps.managedProcesses,
         resolveHomeDir: deps.resolveHomeDir,
+        resolveSharedLaunchEnv: () => {
+          const homeDir = (deps.resolveHomeDir ?? resolveOpenCodeHomeDir)();
+          return resolveOpenCodeSharedServerEnv({
+            homeDir,
+            configContent:
+              runtimeSettings?.env?.OPENCODE_CONFIG_CONTENT ?? process.env.OPENCODE_CONFIG_CONTENT,
+          });
+        },
       });
     this.createOpenCodeClient = deps.createClient ?? createSdkOpenCodeClient;
     this.resolveHomeDir = deps.resolveHomeDir ?? resolveOpenCodeHomeDir;
@@ -1288,9 +1354,7 @@ export class OpenCodeAgentClient implements AgentClient {
     options?: AgentCreateSessionOptions,
   ): Promise<AgentSession> {
     const openCodeConfig = this.assertConfig(config);
-    const acquisition = launchContext?.env
-      ? await this.serverManager.acquireDedicated(launchContext.env)
-      : await this.serverManager.acquireCurrent();
+    const acquisition = await this.serverManager.acquireCurrent();
     const { url } = acquisition.server;
     const client = this.createOpenCodeClient({
       baseUrl: url,
@@ -1325,6 +1389,8 @@ export class OpenCodeAgentClient implements AgentClient {
         options?.persistSession,
         launchContext?.agentId,
         url,
+        false,
+        toOpenCodeSessionContext(launchContext),
       );
     } catch (error) {
       await acquisition.release();
@@ -1354,11 +1420,7 @@ export class OpenCodeAgentClient implements AgentClient {
     const registeredAcquisition = registeredServerUrl
       ? this.serverManager.acquireExisting(registeredServerUrl)
       : null;
-    const acquisition =
-      registeredAcquisition ??
-      (launchContext?.env
-        ? await this.serverManager.acquireDedicated(launchContext.env)
-        : await this.serverManager.acquireCurrent());
+    const acquisition = registeredAcquisition ?? (await this.serverManager.acquireCurrent());
     const { url } = acquisition.server;
     const client = this.createOpenCodeClient({
       baseUrl: url,
@@ -1379,6 +1441,7 @@ export class OpenCodeAgentClient implements AgentClient {
         launchContext?.agentId,
         url,
         registeredAcquisition !== null,
+        toOpenCodeSessionContext(launchContext),
       );
     } catch (error) {
       await acquisition.release();
@@ -1551,6 +1614,9 @@ export class OpenCodeAgentClient implements AgentClient {
 
   async shutdown(): Promise<void> {
     await this.serverManager.shutdown();
+    openCodeProjectMcpConfigs.clear();
+    openCodeSessionContextRegistry.clear();
+    await openCodeSessionContextBridge.close();
   }
 
   async getDiagnostic(): Promise<{ diagnostic: string }> {
@@ -2734,22 +2800,6 @@ function appendOpenCodeSessionStatus(
   // "busy" is transient — no terminal event, no surfaced activity.
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (error: unknown) => void;
-}
-
-function createDeferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
 function unwrapOpenCodeGlobalEvent(event: unknown): OpenCodeEvent | null {
   const record = readOpenCodeRecord(event);
   if (!record) {
@@ -2916,19 +2966,21 @@ class OpenCodeAgentSession implements AgentSession {
   private knownChildSessionIds = new Set<string>();
   private readonly childTranslationStates = new Map<string, OpenCodeEventTranslationState>();
   private readonly childSessionCwds = new Map<string, string>();
+  private readonly childSessionContextReleases = new Map<string, () => void>();
   private readonly pendingPermissionDirectories = new Map<string, string>();
   private childHydrationPromise: Promise<void> | null = null;
   private childHydrationCompleted = false;
   private readonly unrelatedSessionIds = new Set<string>();
   private selectedModelContextWindowMaxTokens: number | undefined;
   private releaseServer: (() => Promise<void>) | null;
-  private eventStreamAbortController: AbortController | null = null;
-  private eventStreamReady: Deferred<void> | null = null;
+  private eventStreamSubscription: OpenCodeGlobalEventSubscription | null = null;
+  private eventStreamReady: Promise<void> | null = null;
   private eventStreamTask: Promise<void> | null = null;
   private suppressTerminalUntilNextUserMessage = false;
   private closed = false;
   private readonly persistSession: boolean;
   private deletedFromProvider = false;
+  private releaseSessionContext: (() => void) | null = null;
   constructor(
     config: OpenCodeAgentConfig,
     client: OpencodeClient,
@@ -2940,6 +2992,7 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly agentId?: string,
     private readonly serverUrl?: string,
     private readonly externallyDriven = false,
+    private readonly sessionContext?: OpenCodeSessionContext,
   ) {
     this.config = config;
     this.client = client;
@@ -2950,6 +3003,9 @@ class OpenCodeAgentSession implements AgentSession {
     this.autoAcceptEnabled = isOpenCodeAutoAcceptEnabled(config);
     this.releaseServer = releaseServer ?? null;
     this.persistSession = persistSession;
+    this.releaseSessionContext = this.sessionContext
+      ? openCodeSessionContextRegistry.bind(this.sessionId, this.sessionContext, "direct")
+      : null;
     this.selectedModelContextWindowMaxTokens = this.resolveConfiguredModelContextWindowMaxTokens(
       config.model,
     );
@@ -3408,10 +3464,18 @@ class OpenCodeAgentSession implements AgentSession {
       if (this.serverUrl) {
         registerOpenCodeChildSessionServerUrl(event.event.id, this.serverUrl);
       }
+      if (this.sessionContext && !this.childSessionContextReleases.has(event.event.id)) {
+        this.childSessionContextReleases.set(
+          event.event.id,
+          openCodeSessionContextRegistry.bind(event.event.id, this.sessionContext, "inherited"),
+        );
+      }
     } else if (event.event.type === "remove") {
       unregisterOpenCodeChildSessionServerUrl(event.event.id);
       this.childTranslationStates.delete(event.event.id);
       this.childSessionCwds.delete(event.event.id);
+      this.childSessionContextReleases.get(event.event.id)?.();
+      this.childSessionContextReleases.delete(event.event.id);
     }
   }
 
@@ -3423,19 +3487,30 @@ class OpenCodeAgentSession implements AgentSession {
 
   private ensureEventStreamReady(): Promise<void> {
     if (this.eventStreamReady) {
-      return this.eventStreamReady.promise;
+      return this.eventStreamReady;
     }
 
-    const eventStreamAbortController = new AbortController();
-    const eventStreamReady = createDeferred<void>();
-    this.eventStreamAbortController = eventStreamAbortController;
+    this.traceOpenCode("provider.opencode.subscribe.start", {
+      sessionId: this.sessionId,
+      cwd: this.config.cwd,
+    });
+    const subscription = openCodeGlobalEventHub.subscribe({
+      serverUrl: this.serverUrl,
+      client: this.client,
+      onEvent: (rawEvent, eventCount) => this.consumeOpenCodeStreamEvent({ rawEvent, eventCount }),
+      onEnd: (error) => this.handleEventStreamEnd(error),
+    });
+    this.eventStreamSubscription = subscription;
+    const eventStreamReady = subscription.ready.then(() => {
+      this.traceOpenCode("provider.opencode.subscribe.ready", {
+        sessionId: this.sessionId,
+      });
+      return undefined;
+    });
     this.eventStreamReady = eventStreamReady;
-    const eventStreamTask = this.consumeEventStream(
-      eventStreamAbortController,
-      eventStreamReady,
-    ).finally(() => {
-      if (this.eventStreamAbortController === eventStreamAbortController) {
-        this.eventStreamAbortController = null;
+    const eventStreamTask = subscription.done.finally(() => {
+      if (this.eventStreamSubscription === subscription) {
+        this.eventStreamSubscription = null;
         this.eventStreamReady = null;
       }
       if (this.eventStreamTask === eventStreamTask) {
@@ -3450,81 +3525,24 @@ class OpenCodeAgentSession implements AgentSession {
       );
     });
 
-    return eventStreamReady.promise;
+    return eventStreamReady;
   }
 
-  private async consumeEventStream(
-    eventStreamAbortController: AbortController,
-    eventStreamReady: Deferred<void>,
-  ): Promise<void> {
-    this.traceOpenCode("provider.opencode.subscribe.start", {
-      sessionId: this.sessionId,
-      cwd: this.config.cwd,
+  private handleEventStreamEnd(error: unknown): void {
+    this.traceOpenCode("provider.opencode.subscribe.error", {
+      turnId: this.activeForegroundTurnId ?? undefined,
+      error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
     });
-    let eventStreamReadyResolved = false;
-    try {
-      const result = await this.client.global.event({
-        signal: eventStreamAbortController.signal,
-        sseMaxRetryAttempts: 0,
-      });
-      eventStreamReadyResolved = true;
-      this.traceOpenCode("provider.opencode.subscribe.ready", {
-        sessionId: this.sessionId,
-      });
-      eventStreamReady.resolve();
-
-      let eventCount = 0;
-      for await (const rawEvent of result.stream) {
-        eventCount += 1;
-        await this.consumeOpenCodeStreamEvent({ rawEvent, eventCount });
-      }
-
-      this.traceOpenCode("provider.opencode.stream.eof", {
-        eventCount,
-        aborted: eventStreamAbortController.signal.aborted,
-        activeTurnId: this.activeForegroundTurnId,
-      });
-
-      if (!eventStreamAbortController.signal.aborted) {
-        if (!eventStreamReadyResolved) {
-          eventStreamReady.reject(new Error("OpenCode event stream ended before it became ready"));
-        }
-        const activeTurnId = this.activeForegroundTurnId;
-        if (activeTurnId) {
-          this.traceOpenCode("provider.opencode.turn.fail_eof", {
-            turnId: activeTurnId,
-            eventCount,
-          });
-          this.finishForegroundTurn(
-            {
-              type: "turn_failed",
-              provider: "opencode",
-              error: "OpenCode event stream ended before the turn reached a terminal state",
-            },
-            activeTurnId,
-          );
-        }
-      }
-    } catch (error) {
-      this.traceOpenCode("provider.opencode.subscribe.error", {
-        turnId: this.activeForegroundTurnId ?? undefined,
-        error:
-          error instanceof Error ? { name: error.name, message: error.message } : String(error),
-      });
-      if (!eventStreamReadyResolved) {
-        eventStreamReady.reject(error);
-      }
-      const activeTurnId = this.activeForegroundTurnId;
-      if (!eventStreamAbortController.signal.aborted && activeTurnId) {
-        this.finishForegroundTurn(
-          {
-            type: "turn_failed",
-            provider: "opencode",
-            error: toDiagnosticErrorMessage(error),
-          },
-          activeTurnId,
-        );
-      }
+    const activeTurnId = this.activeForegroundTurnId;
+    if (activeTurnId) {
+      this.finishForegroundTurn(
+        {
+          type: "turn_failed",
+          provider: "opencode",
+          error: toDiagnosticErrorMessage(error),
+        },
+        activeTurnId,
+      );
     }
   }
 
@@ -3902,7 +3920,7 @@ class OpenCodeAgentSession implements AgentSession {
       this.closed = true;
       this.abortController?.abort();
       const eventStreamTask = this.eventStreamTask;
-      this.eventStreamAbortController?.abort();
+      await this.eventStreamSubscription?.close();
       if (eventStreamTask) {
         await eventStreamTask.catch((error) => {
           this.logger.debug(
@@ -3911,7 +3929,7 @@ class OpenCodeAgentSession implements AgentSession {
           );
         });
       }
-      this.eventStreamAbortController = null;
+      this.eventStreamSubscription = null;
       this.eventStreamReady = null;
       this.eventStreamTask = null;
       this.subscribers.clear();
@@ -3924,6 +3942,12 @@ class OpenCodeAgentSession implements AgentSession {
       await this.deleteProviderSessionIfEphemeral();
       this.activeForegroundTurnId = null;
     } finally {
+      for (const release of this.childSessionContextReleases.values()) {
+        release();
+      }
+      this.childSessionContextReleases.clear();
+      this.releaseSessionContext?.();
+      this.releaseSessionContext = null;
       await this.releaseServer?.();
       this.releaseServer = null;
     }
@@ -4027,19 +4051,43 @@ class OpenCodeAgentSession implements AgentSession {
   private async configureMcpServers(mcpServers: Record<string, McpServerConfig>): Promise<void> {
     await Promise.all(
       Object.entries(mcpServers).map(([name, serverConfig]) =>
-        this.registerMcpServer(name, toOpenCodeMcpConfig(serverConfig)),
+        this.registerMcpServer(
+          name,
+          toOpenCodeMcpConfig(normalizeOpenCodeMcpServerConfig(name, serverConfig)),
+        ),
       ),
     );
   }
 
   private async registerMcpServer(name: string, config: OpenCodeMcpConfig): Promise<void> {
-    await this.runMcpOperation("add", name, () =>
+    const registrationKey = `${this.serverUrl ?? "unknown"}\0${this.config.cwd}\0${name}`;
+    const serializedConfig = serializeOpenCodeMcpConfig(config);
+    const registration = openCodeProjectMcpConfigs.get(registrationKey);
+    if (registration?.serializedConfig === serializedConfig) {
+      await registration.ready;
+      return;
+    }
+    if (registration) {
+      throw new Error(
+        `OpenCode MCP server '${name}' already has a different project-scoped configuration for '${this.config.cwd}'`,
+      );
+    }
+    const ready = this.runMcpOperation("add", name, () =>
       this.client.mcp.add({
         directory: this.config.cwd,
         name,
         config,
       }),
     );
+    openCodeProjectMcpConfigs.set(registrationKey, { serializedConfig, ready });
+    try {
+      await ready;
+    } catch (error) {
+      if (openCodeProjectMcpConfigs.get(registrationKey)?.ready === ready) {
+        openCodeProjectMcpConfigs.delete(registrationKey);
+      }
+      throw error;
+    }
   }
 
   private async runMcpOperation(
@@ -4203,6 +4251,12 @@ class OpenCodeAgentSession implements AgentSession {
         await this.childHydrationPromise?.catch(() => undefined);
       }
       if (!this.knownChildSessionIds.has(eventSessionId)) {
+        if (this.unrelatedSessionIds.size >= OPENCODE_UNRELATED_SESSION_REGISTRY_LIMIT) {
+          const oldestSessionId = this.unrelatedSessionIds.values().next().value;
+          if (oldestSessionId) {
+            this.unrelatedSessionIds.delete(oldestSessionId);
+          }
+        }
         this.unrelatedSessionIds.add(eventSessionId);
       }
     }

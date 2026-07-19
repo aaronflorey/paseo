@@ -136,6 +136,10 @@ import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import {
+  openCodeSessionContextRegistry,
+  OPENCODE_SESSION_ROUTING_MODE,
+} from "./agent/providers/opencode/session-context.js";
+import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
 } from "./agent/tools/paseo-tools.js";
@@ -1280,10 +1284,22 @@ export async function createPaseoDaemon(
   if (mcpEnabled) {
     const agentMcpRoute = "/mcp/agents";
 
-    const createAgentMcpSession = async (callerAgentId?: string) => {
-      const agentMcpServer = await createAgentMcpServer(
-        createAgentToolHostDependencies({ callerAgentId }),
-      );
+    const createAgentMcpSession = async (
+      callerAgentId?: string,
+      sessionRouting?: typeof OPENCODE_SESSION_ROUTING_MODE,
+    ) => {
+      const agentMcpServer = await createAgentMcpServer({
+        ...createAgentToolHostDependencies({
+          callerAgentId,
+          enableVoiceTools: sessionRouting === OPENCODE_SESSION_ROUTING_MODE,
+        }),
+        ...(sessionRouting === OPENCODE_SESSION_ROUTING_MODE
+          ? {
+              sessionCatalogResolver: (sessionId: string) =>
+                openCodeSessionContextRegistry.resolve(sessionId)?.paseoTools,
+            }
+          : {}),
+      });
 
       // Stateless mode: each HTTP request builds a fresh server + transport that is
       // torn down when the response closes, so no per-session state is retained between
@@ -1358,7 +1374,12 @@ export async function createPaseoDaemon(
         } else if (Array.isArray(callerAgentIdRaw) && typeof callerAgentIdRaw[0] === "string") {
           callerAgentId = callerAgentIdRaw[0];
         }
-        const { server, transport } = await createAgentMcpSession(callerAgentId);
+        const sessionRoutingRaw = req.query.sessionRouting;
+        const sessionRouting =
+          sessionRoutingRaw === OPENCODE_SESSION_ROUTING_MODE
+            ? OPENCODE_SESSION_ROUTING_MODE
+            : undefined;
+        const { server, transport } = await createAgentMcpSession(callerAgentId, sessionRouting);
         res.on("close", () => {
           void transport.close();
           void server.close();

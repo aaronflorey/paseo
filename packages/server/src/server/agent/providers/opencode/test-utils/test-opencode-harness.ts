@@ -7,17 +7,23 @@ interface OpenCodeResponse {
   error?: unknown;
 }
 
+let nextTestOpenCodePort = 12_340;
+
 export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
   readonly acquisitions: Array<{
-    kind: "current" | "new" | "dedicated" | "existing";
+    kind: "current" | "new" | "existing";
     env?: Record<string, string>;
     url?: string;
     releaseCount: number;
   }> = [];
   readonly clientCreations: Array<{ baseUrl: string; directory: string }> = [];
   private readonly clients: TestOpenCodeClient[] = [];
+  private readonly globalEventStream = createQueuedEventStream();
 
-  server = { port: 1234, url: "http://127.0.0.1:1234" };
+  readonly server = (() => {
+    const port = nextTestOpenCodePort++;
+    return { port, url: `http://127.0.0.1:${port}` };
+  })();
 
   enqueueClient(client: TestOpenCodeClient): void {
     this.clients.push(client);
@@ -31,16 +37,12 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
     return this.recordAcquisition({ kind: "new" });
   }
 
-  async acquireDedicated(env: Record<string, string>): Promise<OpenCodeServerAcquisition> {
-    return this.recordAcquisition({ kind: "dedicated", env });
-  }
-
   acquireExisting(url: string): OpenCodeServerAcquisition | null {
     return url === this.server.url ? this.recordAcquisition({ kind: "existing", url }) : null;
   }
 
   private recordAcquisition(input: {
-    kind: "current" | "new" | "dedicated" | "existing";
+    kind: "current" | "new" | "existing";
     env?: Record<string, string>;
     url?: string;
   }): OpenCodeServerAcquisition {
@@ -62,6 +64,7 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
   readonly createClient = (options: { baseUrl: string; directory: string }): OpencodeClient => {
     this.clientCreations.push(options);
     const client = this.clients.shift() ?? new TestOpenCodeClient();
+    client.attachGlobalEventStream(this.globalEventStream);
     return client.asSdkClient();
   };
 
@@ -122,13 +125,23 @@ export class TestOpenCodeClient {
   sessionSummarizeResponse: OpenCodeResponse = { data: {} };
   sessionUpdateResponse: OpenCodeResponse = {};
   private readonly queuedEventStream = createQueuedEventStream();
+  private eventEmitter: (event: unknown) => void;
 
   constructor() {
     this.eventStream = this.queuedEventStream.stream;
+    this.eventEmitter = this.queuedEventStream.emit;
+  }
+
+  attachGlobalEventStream(eventStream: {
+    stream: AsyncIterable<unknown>;
+    emit: (event: unknown) => void;
+  }): void {
+    this.eventStream = eventStream.stream;
+    this.eventEmitter = eventStream.emit;
   }
 
   emitEvent(event: unknown): void {
-    this.queuedEventStream.emit(event);
+    this.eventEmitter(event);
   }
 
   asSdkClient(): OpencodeClient {

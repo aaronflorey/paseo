@@ -8,10 +8,13 @@
 FROM ghcr.io/getpaseo/paseo:latest
 
 USER root
+# OpenCode's installer initializes runtime state under the image HOME. Keep it
+# writable after the entrypoint drops to the non-root paseo user.
 RUN npm install -g \
   @anthropic-ai/claude-code \
   @openai/codex \
-  opencode-ai
+  opencode-ai \
+  && chown -R paseo:paseo /home/paseo
 
 # Leave the image user as root. The base entrypoint prepares mounted volumes,
 # then drops the daemon and launched agents to the non-root `paseo` user.

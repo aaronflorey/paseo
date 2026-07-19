@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createAgentMcpServer } from "./mcp-server.js";
+import { OPENCODE_SESSION_ID_TOOL_ARGUMENT } from "./providers/opencode/session-context.js";
 import { AgentManager, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
@@ -56,6 +57,7 @@ import type { BrowserToolsBroker, BrowserToolsExecuteInput } from "../browser-to
 import type { BrowserToolsResponsePayload } from "../browser-tools/errors.js";
 import { readPaseoWorktreeMetadata } from "../../utils/worktree-metadata.js";
 import { createWorkspaceProvisioningService } from "../session/workspace-provisioning/workspace-provisioning-service.js";
+import type { PaseoToolCatalog } from "./tools/types.js";
 
 const REPO_CWD = resolvePath("/tmp/repo");
 const TARGET_CWD = resolvePath("/tmp/target");
@@ -1055,6 +1057,79 @@ describe("browser MCP tools", () => {
       },
       context: { agentId: "agent-1", cwd: REPO_CWD },
     });
+  });
+});
+
+describe("session-routed MCP tools", () => {
+  it("keeps provider session identity out of the advertised schema and dispatches by it", async () => {
+    const executeTool = vi.fn(async (_name: string, input: unknown) => ({
+      content: [{ type: "text", text: JSON.stringify(input) }],
+      structuredContent: { routed: true, input },
+    }));
+    const routedCatalog: PaseoToolCatalog = {
+      tools: new Map(),
+      getTool: (name) =>
+        name === "list_agents"
+          ? {
+              name,
+              description: name,
+              inputSchema: {},
+              handler: async () => ({ content: [] }),
+            }
+          : undefined,
+      executeTool,
+    };
+    const server = await createAgentMcpServer({
+      agentManager: new BoundaryAgentManagerFake() as AgentManager,
+      agentStorage: new BoundaryAgentStorageFake() as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      callerAgentId: "opencode-shared",
+      sessionCatalogResolver: (sessionId) =>
+        sessionId === "session-routed" ? routedCatalog : undefined,
+      logger: createTestLogger(),
+    });
+    const client = await connectInMemoryMcpClient(server);
+
+    try {
+      const listed = await client.listTools();
+      const listAgents = listed.tools.find((tool) => tool.name === "list_agents");
+      expect(listAgents?.inputSchema.properties).not.toHaveProperty(
+        OPENCODE_SESSION_ID_TOOL_ARGUMENT,
+      );
+
+      const result = await client.callTool({
+        name: "list_agents",
+        arguments: {
+          [OPENCODE_SESSION_ID_TOOL_ARGUMENT]: "session-routed",
+          probe: "value",
+        },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        routed: true,
+        input: {
+          includeArchived: false,
+          limit: 50,
+          probe: "value",
+          sinceHours: 48,
+        },
+      });
+      expect(executeTool).toHaveBeenCalledWith(
+        "list_agents",
+        {
+          includeArchived: false,
+          limit: 50,
+          probe: "value",
+          sinceHours: 48,
+        },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 });
 
