@@ -142,6 +142,24 @@ const OPENCODE_MODES: AgentProviderModeDefinition[] = [
   },
 ];
 
+const CRUSH_MODES: AgentProviderModeDefinition[] = [
+  {
+    id: "ask",
+    label: "Always Ask",
+    description: "Ask before permission-gated write and execution tools",
+    icon: "ShieldCheck",
+    colorTier: "safe",
+  },
+  {
+    id: "full",
+    label: "Full Access",
+    description: "Skip Crush tool permission prompts",
+    icon: "ShieldOff",
+    colorTier: "dangerous",
+    isUnattended: true,
+  },
+];
+
 export const OMP_MODES: AgentProviderModeDefinition[] = [
   {
     id: "full",
@@ -211,6 +229,13 @@ export const AGENT_PROVIDER_DEFINITIONS: AgentProviderDefinition[] = [
     description: "GitHub Copilot via Agent Client Protocol with dynamic modes and session support",
     defaultModeId: "https://agentclientprotocol.com/protocol/session-modes#agent",
     modes: COPILOT_MODES,
+  },
+  {
+    id: "crush",
+    label: "Crush",
+    description: "Charmbracelet's coding agent through a shared managed server",
+    defaultModeId: "ask",
+    modes: CRUSH_MODES,
   },
   {
     id: "opencode",

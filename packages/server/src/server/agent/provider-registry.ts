@@ -32,6 +32,7 @@ import type {
 import { ClaudeAgentClient } from "./providers/claude/agent.js";
 import { CodexAppServerAgentClient } from "./providers/codex-app-server-agent.js";
 import { CopilotACPAgentClient } from "./providers/copilot-acp-agent.js";
+import { CrushAgentClient } from "./providers/crush-agent.js";
 import { CursorACPAgentClient } from "./providers/cursor-acp-agent.js";
 import { GenericACPAgentClient } from "./providers/generic-acp-agent.js";
 import { KiroACPAgentClient } from "./providers/kiro-acp-agent.js";
@@ -130,6 +131,10 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new CopilotACPAgentClient({
       logger,
       runtimeSettings,
+    }),
+  crush: (logger, runtimeSettings, options) =>
+    new CrushAgentClient(logger, runtimeSettings, {
+      managedProcesses: options?.managedProcesses,
     }),
   cursor: (logger, runtimeSettings) =>
     new CursorACPAgentClient({
