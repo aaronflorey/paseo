@@ -14,6 +14,8 @@ import { OPENCODE_PLUGIN_SOURCE } from "./opencode-plugin.js";
 
 const temporaryDirs: string[] = [];
 const originalTerminalId = process.env.PASEO_TERMINAL_ID;
+const originalHookCli = process.env.PASEO_HOOK_CLI;
+const originalPath = process.env.PATH;
 const globalWithBun = globalThis as typeof globalThis & { Bun?: BunStub };
 const originalBun = globalWithBun.Bun;
 let moduleSequence = 0;
@@ -40,6 +42,14 @@ function setTerminalId(value: string | undefined): void {
   process.env.PASEO_TERMINAL_ID = value;
 }
 
+function setProcessEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
 async function loadTerminalActivityHooks(): Promise<TerminalActivityHooks> {
   const directory = createTempDir("paseo-opencode-plugin-module-");
   const modulePath = join(directory, `terminal-activity-${moduleSequence}.mjs`);
@@ -55,6 +65,8 @@ async function loadTerminalActivityHooks(): Promise<TerminalActivityHooks> {
 
 afterEach(() => {
   setTerminalId(originalTerminalId);
+  setProcessEnvironment("PASEO_HOOK_CLI", originalHookCli);
+  setProcessEnvironment("PATH", originalPath);
   if (originalBun === undefined) {
     delete globalWithBun.Bun;
   } else {
@@ -97,7 +109,8 @@ describe("OpenCode terminal agent hooks", () => {
     expect(source).toContain('idle: "session.status.idle"');
     expect(source).toContain('event?.type === "permission.asked"');
     expect(source).toContain('event?.type === "permission.replied"');
-    expect(source).toContain('Bun.spawn(["paseo", "hooks", "opencode", event]');
+    expect(source).toContain('process.env.PASEO_HOOK_CLI || "paseo"');
+    expect(source).toContain('Bun.spawn([cli, "hooks", "opencode", event]');
     expect(source).toContain("PASEO_TERMINAL_ID");
   });
 
@@ -202,6 +215,43 @@ describe.sequential("generated OpenCode terminal-activity plugin", () => {
     expect(spawn.mock.calls).toEqual(
       mappedEvents.map(([, event]) => [["paseo", "hooks", "opencode", event], spawnOptions]),
     );
+  });
+
+  it("uses the complete hook CLI override regardless of PATH", async () => {
+    setTerminalId("terminal-1");
+    setProcessEnvironment("PASEO_HOOK_CLI", "/tmp/Paseo CLI/bin/paseo");
+    setProcessEnvironment("PATH", "/usr/bin:/bin");
+    const spawn = vi
+      .fn<BunStub["spawn"]>()
+      .mockImplementation(() => ({ exited: Promise.resolve(0) }));
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+
+    await hooks.event({ event: { type: "permission.asked" } });
+
+    expect(spawn).toHaveBeenCalledWith(
+      ["/tmp/Paseo CLI/bin/paseo", "hooks", "opencode", "permission.asked"],
+      { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+    );
+  });
+
+  it("falls back to paseo when the hook CLI override is missing or empty", async () => {
+    setTerminalId("terminal-1");
+    const spawn = vi
+      .fn<BunStub["spawn"]>()
+      .mockImplementation(() => ({ exited: Promise.resolve(0) }));
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+
+    for (const override of [undefined, ""]) {
+      setProcessEnvironment("PASEO_HOOK_CLI", override);
+      await hooks.event({ event: { type: "permission.replied" } });
+    }
+
+    expect(spawn.mock.calls.map(([argv]) => argv)).toEqual([
+      ["paseo", "hooks", "opencode", "permission.replied"],
+      ["paseo", "hooks", "opencode", "permission.replied"],
+    ]);
   });
 
   it("does not spawn without a terminal ID or for unmapped events", async () => {

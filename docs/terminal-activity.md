@@ -45,7 +45,7 @@ Terminals receive four environment variables when the daemon creates the shell:
 - `PASEO_TERMINAL_ACTIVITY_URL`
 - `PASEO_HOOK_CLI` — absolute path to the current `paseo` CLI executable.
 
-The generated shell command uses `PASEO_HOOK_CLI` to run the current CLI. `paseo hooks <agent> <event>` then reads the terminal id, token, and activity URL, asks the agent hook provider registry to resolve the event to a coarse activity state, and silently posts `{ terminalId, token, state }` to the activity URL. Missing env, unsupported agents/events, malformed hook input, and daemon/network failures are no-ops so agent hooks never break the user's terminal session.
+Generated terminal hooks prefer `PASEO_HOOK_CLI` to run the current CLI and fall back to bare `paseo` when it is missing or empty. `paseo hooks <agent> <event>` then reads the terminal id, token, and activity URL, asks the agent hook provider registry to resolve the event to a coarse activity state, and silently posts `{ terminalId, token, state }` to the activity URL. Missing env, unsupported agents/events, malformed hook input, and daemon/network failures are no-ops so agent hooks never break the user's terminal session.
 
 Claude hook mapping:
 
@@ -107,6 +107,6 @@ Codex also receives the Windows equivalent:
 if defined PASEO_TERMINAL_ID (if defined PASEO_HOOK_CLI ("%PASEO_HOOK_CLI%" hooks codex <event>) else (paseo hooks codex <event>))
 ```
 
-Paseo injects `PASEO_HOOK_CLI` so Codex's hook shell cannot pick up a stale global `paseo` before the current one. The command still falls back to bare `paseo` if the env is missing, and it still no-ops outside Paseo terminals because the `PASEO_TERMINAL_ID` gate remains first. Paseo also prepends the CLI binary directory to each terminal `PATH` as a secondary fallback. All other behavior lives in `paseo hooks`: read the env, map the event, POST activity, and no-op/fail-open when anything is missing or unavailable.
+Paseo injects `PASEO_HOOK_CLI` so command hooks and the OpenCode plugin cannot pick up a stale global `paseo` before the current one. They still fall back to bare `paseo` if the env is missing or empty, and still no-op outside Paseo terminals because the `PASEO_TERMINAL_ID` gate remains first. Paseo also prepends the CLI binary directory to each terminal `PATH` as a secondary fallback. All other behavior lives in `paseo hooks`: read the env, map the event, POST activity, and no-op/fail-open when anything is missing or unavailable.
 
 If config installation fails, daemon startup and terminal spawn continue without terminal activity hooks.
