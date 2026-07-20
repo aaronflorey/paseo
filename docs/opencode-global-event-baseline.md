@@ -48,6 +48,18 @@ The previously failing provider unit file now passes, and `packages/server/src/s
 
 One live reasoning-dedup matrix run returned no reasoning content; an immediate targeted rerun passed. This appears model-output dependent rather than related to the event-stream change.
 
+## CLI Runner Follow-Up
+
+On 2026-07-20, the invalid-model regression moved from the orphaned Vitest path to the numbered CLI runner script `packages/cli/tests/37-opencode-invalid-model.test.ts`. The historical "No test suite found" results above remain the baseline for the old file; the replacement is intentionally executed by the CLI runner with `npx tsx`, not Vitest.
+
+After `npm run build:server`, the targeted command passed:
+
+```bash
+npx tsx packages/cli/tests/37-opencode-invalid-model.test.ts
+```
+
+The runner coverage now requires an invalid OpenCode model to terminate with a nonzero result, clearly report failure without reporting completion, and leave any emitted agent in a terminal error state.
+
 ## Focused Verification
 
 - `npm run typecheck`
