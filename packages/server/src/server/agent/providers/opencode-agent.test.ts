@@ -2966,6 +2966,68 @@ describe("OpenCode provider subagent contract", () => {
         reply: "once",
       }),
     );
+    expect(parentClient.calls.instanceDispose).toContainEqual({
+      directory: "/workspace/child",
+    });
+    await parent.close();
+  });
+
+  test("preserves child permission reply errors while releasing the child lease", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const parentClient = new TestOpenCodeClient();
+    parentClient.sessionCreateResponse = { data: { id: "ses_parent_permission_failure" } };
+    const sdkClient = parentClient.asSdkClient();
+    const replyError = new Error("child permission reply failed");
+    Object.assign(sdkClient.permission, {
+      reply: vi.fn(async (parameters: unknown) => {
+        parentClient.calls.permissionReply.push(parameters);
+        throw replyError;
+      }),
+    });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: () => sdkClient,
+    });
+    const parent = await client.createSession({ provider: "opencode", cwd: "/workspace/root" });
+    parent.subscribe(() => undefined);
+
+    parentClient.emitEvent({
+      type: "session.created",
+      properties: {
+        info: {
+          id: "ses_provider_child_permission_failure",
+          parentID: "ses_parent_permission_failure",
+          title: "Permission failure child",
+          directory: "/workspace/child",
+        },
+      },
+    });
+    parentClient.emitEvent({
+      type: "permission.asked",
+      properties: {
+        id: "perm_provider_child_failure",
+        sessionID: "ses_provider_child_permission_failure",
+        permission: "bash",
+        patterns: ["npm test"],
+        metadata: { command: "npm test" },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(parent.getPendingPermissions()).toContainEqual(
+        expect.objectContaining({ id: "perm_provider_child_failure" }),
+      ),
+    );
+
+    await expect(
+      parent.respondToPermission("perm_provider_child_failure", { behavior: "allow" }),
+    ).rejects.toBe(replyError);
+    expect(parentClient.calls.permissionReply).toEqual([
+      expect.objectContaining({
+        requestID: "perm_provider_child_failure",
+        directory: "/workspace/child",
+      }),
+    ]);
+    expect(parentClient.calls.instanceDispose).toContainEqual({ directory: "/workspace/child" });
     await parent.close();
   });
 
@@ -3020,6 +3082,9 @@ describe("OpenCode provider subagent contract", () => {
       ),
     );
     expect(parent.getPendingPermissions()).toEqual([]);
+    expect(parentClient.calls.instanceDispose).toContainEqual({
+      directory: "/workspace/auto-child",
+    });
     await parent.close();
   });
 
@@ -3100,6 +3165,36 @@ describe("OpenCode provider subagent contract", () => {
         answers: [["A"]],
       }),
     );
+
+    parentClient.emitEvent({
+      type: "question.asked",
+      properties: {
+        id: "question_provider_child_reject",
+        sessionID: "ses_provider_child_question",
+        questions: [
+          {
+            question: "Continue?",
+            header: "Continue",
+            options: [{ label: "No", description: "Stop here" }],
+          },
+        ],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(parent.getPendingPermissions()).toContainEqual(
+        expect.objectContaining({ id: "question_provider_child_reject" }),
+      ),
+    );
+    await parent.respondToPermission("question_provider_child_reject", { behavior: "deny" });
+    expect(parentClient.calls.questionReject).toContainEqual({
+      requestID: "question_provider_child_reject",
+      directory: "/workspace/question-child",
+    });
+    expect(
+      parentClient.calls.instanceDispose.filter(
+        (call) => (call as { directory?: string }).directory === "/workspace/question-child",
+      ),
+    ).toHaveLength(2);
     await parent.close();
   });
 
@@ -3267,11 +3362,30 @@ describe("OpenCode provider subagent contract", () => {
     openCodeClient.sessionChildrenResponses = [
       {
         data: [
-          { id: "ses_child_a", parentID: "ses_parent", title: "Child A" },
-          { id: "ses_child_b", parentID: "ses_parent", title: "Child B" },
+          {
+            id: "ses_child_a",
+            parentID: "ses_parent",
+            title: "Child A",
+            directory: "/workspace/child",
+          },
+          {
+            id: "ses_child_b",
+            parentID: "ses_parent",
+            title: "Child B",
+            directory: "/workspace/root",
+          },
         ],
       },
-      { data: [{ id: "ses_grandchild_a", parentID: "ses_child_a", title: "Grandchild A" }] },
+      {
+        data: [
+          {
+            id: "ses_grandchild_a",
+            parentID: "ses_child_a",
+            title: "Grandchild A",
+            directory: "/workspace/grandchild",
+          },
+        ],
+      },
       { data: [] },
       { data: [] },
     ];
@@ -3280,7 +3394,7 @@ describe("OpenCode provider subagent contract", () => {
       serverManager: runtime,
       createClient: runtime.createClient,
     });
-    const session = await client.createSession({ provider: "opencode", cwd: "/workspace/repo" });
+    const session = await client.createSession({ provider: "opencode", cwd: "/workspace/root" });
     const events: AgentStreamEvent[] = [];
     session.subscribe((event) => events.push(event));
 
@@ -3288,21 +3402,55 @@ describe("OpenCode provider subagent contract", () => {
     await session.close();
 
     expect(openCodeClient.calls.sessionChildren).toEqual([
-      { path: { id: "ses_parent" } },
-      { path: { id: "ses_child_a" } },
-      { path: { id: "ses_child_b" } },
-      { path: { id: "ses_grandchild_a" } },
+      { path: { id: "ses_parent" }, query: { directory: "/workspace/root" } },
+      { path: { id: "ses_child_a" }, query: { directory: "/workspace/child" } },
+      { path: { id: "ses_child_b" }, query: { directory: "/workspace/root" } },
+      {
+        path: { id: "ses_grandchild_a" },
+        query: { directory: "/workspace/grandchild" },
+      },
+    ]);
+    expect(openCodeClient.calls.sessionStatus).toEqual([
+      { directory: "/workspace/child" },
+      { directory: "/workspace/root" },
+      { directory: "/workspace/grandchild" },
+    ]);
+    expect(openCodeClient.calls.sessionMessages).toEqual([
+      { sessionID: "ses_child_a", directory: "/workspace/child" },
+      { sessionID: "ses_child_b", directory: "/workspace/root" },
+      { sessionID: "ses_grandchild_a", directory: "/workspace/grandchild" },
+    ]);
+    expect(openCodeClient.calls.instanceDispose).toEqual([
+      { directory: "/workspace/child" },
+      { directory: "/workspace/child" },
+      { directory: "/workspace/child" },
+      { directory: "/workspace/grandchild" },
+      { directory: "/workspace/grandchild" },
+      { directory: "/workspace/grandchild" },
+      { directory: "/workspace/root" },
     ]);
     expect(events).toEqual([
       {
         type: "provider_subagent",
         provider: "opencode",
-        event: { type: "upsert", id: "ses_child_a", title: "Child A", status: "running" },
+        event: {
+          type: "upsert",
+          id: "ses_child_a",
+          title: "Child A",
+          status: "running",
+          cwd: "/workspace/child",
+        },
       },
       {
         type: "provider_subagent",
         provider: "opencode",
-        event: { type: "upsert", id: "ses_child_b", title: "Child B", status: "running" },
+        event: {
+          type: "upsert",
+          id: "ses_child_b",
+          title: "Child B",
+          status: "running",
+          cwd: "/workspace/root",
+        },
       },
       {
         type: "provider_subagent",
@@ -3312,9 +3460,100 @@ describe("OpenCode provider subagent contract", () => {
           id: "ses_grandchild_a",
           title: "Grandchild A",
           status: "running",
+          cwd: "/workspace/grandchild",
         },
       },
     ]);
+  });
+
+  test("keeps a child directory leased while message hydration outlives root close", async () => {
+    const messages = createTestDeferred<{ data: [] }>();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionCreateResponse = { data: { id: "ses_parent_deferred_child" } };
+    openCodeClient.sessionChildrenResponses = [
+      {
+        data: [
+          {
+            id: "ses_child_deferred_messages",
+            parentID: "ses_parent_deferred_child",
+            title: "Deferred child",
+            directory: "/workspace/child",
+          },
+        ],
+      },
+    ];
+    openCodeClient.sessionMessagesImplementation = async () => await messages.promise;
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/root",
+    });
+    session.subscribe(() => undefined);
+
+    await vi.waitFor(() => expect(openCodeClient.calls.sessionMessages).toHaveLength(1));
+    expect(openCodeClient.calls.instanceDispose).toEqual([{ directory: "/workspace/child" }]);
+
+    await session.close();
+    expect(openCodeClient.calls.instanceDispose).toEqual([
+      { directory: "/workspace/child" },
+      { directory: "/workspace/root" },
+    ]);
+
+    messages.resolve({ data: [] });
+    await vi.waitFor(() =>
+      expect(openCodeClient.calls.instanceDispose).toEqual([
+        { directory: "/workspace/child" },
+        { directory: "/workspace/root" },
+        { directory: "/workspace/child" },
+      ]),
+    );
+  });
+
+  test("releases a child directory lease when deferred message hydration rejects", async () => {
+    const messages = createTestDeferred<{ data: [] }>();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionCreateResponse = { data: { id: "ses_parent_rejected_child" } };
+    openCodeClient.sessionChildrenResponses = [
+      {
+        data: [
+          {
+            id: "ses_child_rejected_messages",
+            parentID: "ses_parent_rejected_child",
+            title: "Rejected child",
+            directory: "/workspace/child",
+          },
+        ],
+      },
+    ];
+    openCodeClient.sessionMessagesImplementation = async () => await messages.promise;
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/root",
+    });
+    session.subscribe(() => undefined);
+
+    await vi.waitFor(() => expect(openCodeClient.calls.sessionMessages).toHaveLength(1));
+    await session.close();
+    messages.reject(new Error("child message hydration failed"));
+
+    await vi.waitFor(() =>
+      expect(openCodeClient.calls.instanceDispose).toEqual([
+        { directory: "/workspace/child" },
+        { directory: "/workspace/root" },
+        { directory: "/workspace/child" },
+      ]),
+    );
   });
 
   test("hydrates persisted child messages into the provider subagent timeline", async () => {
@@ -3415,6 +3654,7 @@ describe("OpenCode provider subagent contract", () => {
             id: "ses_child_partial_history",
             parentID: "ses_parent_partial_history",
             title: "Busy historical child",
+            directory: "/workspace/repo",
           },
         ],
       },
@@ -3481,6 +3721,7 @@ describe("OpenCode provider subagent contract", () => {
           id: "ses_child_partial_history",
           title: "Busy historical child",
           status: "running",
+          cwd: "/workspace/repo",
         },
       }),
     );
@@ -3584,6 +3825,7 @@ describe("OpenCode provider subagent contract", () => {
           id: "ses_child_hydrating",
           parentID: "ses_parent_hydrating",
           title: "Hydrating child",
+          directory: "/workspace/repo",
         },
       ],
     });
@@ -3890,6 +4132,7 @@ describe("OpenCode provider subagent contract", () => {
           id: "ses_child_dedupe",
           parentID: "ses_parent_dedupe",
           title: "Dedupe child",
+          directory: "/workspace/repo",
         },
       ],
     });
@@ -3927,6 +4170,7 @@ describe("OpenCode provider subagent contract", () => {
             id: "ses_child_live_hydration",
             parentID: "ses_parent_live_hydration",
             title: "Live hydration child",
+            directory: "/workspace/repo",
           },
         ],
       },
@@ -3974,7 +4218,16 @@ describe("OpenCode provider subagent contract", () => {
     const openCodeClient = new TestOpenCodeClient();
     openCodeClient.sessionCreateResponse = { data: { id: "ses_parent_busy" } };
     openCodeClient.sessionChildrenResponses = [
-      { data: [{ id: "ses_child_busy", parentID: "ses_parent_busy", title: "Busy child" }] },
+      {
+        data: [
+          {
+            id: "ses_child_busy",
+            parentID: "ses_parent_busy",
+            title: "Busy child",
+            directory: "/workspace/repo",
+          },
+        ],
+      },
       { data: [] },
     ];
     runtime.enqueueClient(openCodeClient);

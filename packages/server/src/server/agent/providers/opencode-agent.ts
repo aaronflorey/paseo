@@ -72,6 +72,7 @@ import {
   type OpenCodeGlobalEventSubscription,
 } from "./opencode/global-event-hub.js";
 import { normalizeOpenCodeGlobalEvent } from "./opencode/event-normalizer.js";
+import type { OpenCodeProjectInstanceLeaseCoordinator } from "./opencode/project-instance-leases.js";
 import {
   OpenCodeServerManager,
   type OpenCodeServerAcquisition,
@@ -1440,6 +1441,7 @@ export class OpenCodeAgentClient implements AgentClient {
         false,
         toOpenCodeSessionContext(launchContext),
         acquisition.server.generation,
+        this.serverManager.projectInstanceLeases,
       );
     } catch (error) {
       await scope.release();
@@ -1490,6 +1492,7 @@ export class OpenCodeAgentClient implements AgentClient {
         registeredAcquisition !== null,
         toOpenCodeSessionContext(launchContext),
         acquisition.server.generation,
+        this.serverManager.projectInstanceLeases,
       );
     } catch (error) {
       await scope.release();
@@ -3502,7 +3505,7 @@ async function listOpenCodeChildSessions(
 ): Promise<OpenCodeChildSessionInfo[]> {
   try {
     const pathResponse: unknown = await Reflect.apply(client.session.children, client.session, [
-      { path: { id: sessionId } },
+      { path: { id: sessionId }, query: { directory } },
     ]);
     const pathChildren = readOpenCodeChildSessionInfosFromResponse(pathResponse);
     if (pathChildren) {
@@ -3620,6 +3623,7 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly externallyDriven = false,
     private readonly sessionContext?: OpenCodeSessionContext,
     private readonly serverGeneration: object = client,
+    private readonly projectInstanceLeases?: OpenCodeProjectInstanceLeaseCoordinator,
   ) {
     this.config = config;
     this.matchesSessionDirectory = createPathEquivalenceMatcher(config.cwd);
@@ -4001,28 +4005,31 @@ class OpenCodeAgentSession implements AgentSession {
   }
 
   private async hydrateChildSessions(): Promise<void> {
-    const queue = [this.sessionId];
+    const queue = [{ sessionId: this.sessionId, directory: this.config.cwd }];
     const visited = new Set<string>();
     const statusesByDirectory = new Map<string, Promise<Map<string, string>>>();
     while (queue.length > 0 && visited.size < OPENCODE_CHILD_SESSION_HYDRATION_LIMIT) {
-      const parentSessionId = queue.shift();
-      if (!parentSessionId || visited.has(parentSessionId)) {
+      const parent = queue.shift();
+      if (!parent || visited.has(parent.sessionId)) {
         continue;
       }
-      visited.add(parentSessionId);
-      const children = await listOpenCodeChildSessions(
-        this.client,
-        parentSessionId,
-        this.config.cwd,
+      visited.add(parent.sessionId);
+      const children = await this.withLeasedProjectOperation(parent.directory, () =>
+        listOpenCodeChildSessions(this.client, parent.sessionId, parent.directory),
       );
       if (this.closed) return;
       for (const child of children) {
-        const directory = child.directory ?? this.config.cwd;
+        const directory = child.directory;
+        if (!directory) {
+          throw new Error(
+            `OpenCode child session '${child.id}' did not include its project directory`,
+          );
+        }
         let statusesPromise = statusesByDirectory.get(directory);
         if (!statusesPromise) {
-          statusesPromise = readOpenCodeSessionStatuses(this.client, directory).catch(
-            () => new Map(),
-          );
+          statusesPromise = this.withLeasedProjectOperation(directory, () =>
+            readOpenCodeSessionStatuses(this.client, directory),
+          ).catch(() => new Map());
           statusesByDirectory.set(directory, statusesPromise);
         }
         const providerStatus = (await statusesPromise).get(child.id);
@@ -4061,19 +4068,25 @@ class OpenCodeAgentSession implements AgentSession {
             this.childTimelineHydrations.delete(child.id);
           }
         }
+        if (this.closed) return;
         if (visited.size + queue.length < OPENCODE_CHILD_SESSION_HYDRATION_LIMIT) {
-          queue.push(child.id);
+          queue.push({ sessionId: child.id, directory });
         }
       }
     }
   }
 
   private async hydrateChildSessionTimeline(child: OpenCodeChildSessionInfo): Promise<boolean> {
-    const messages = await readOpenCodeSessionMessagesFromSdk(this.client, {
-      id: child.id,
-      directory: child.directory ?? this.config.cwd,
-      ...(child.revert ? { revert: child.revert } : {}),
-    } as OpenCodePersistedSession);
+    if (!child.directory) {
+      throw new Error(`OpenCode child session '${child.id}' did not include its project directory`);
+    }
+    const messages = await this.withLeasedProjectOperation(child.directory, () =>
+      readOpenCodeSessionMessagesFromSdk(this.client, {
+        id: child.id,
+        directory: child.directory,
+        ...(child.revert ? { revert: child.revert } : {}),
+      } as OpenCodePersistedSession),
+    );
     const translationState = this.getChildTranslationState(child.id);
     let latestReplayedMessage: OpenCodeSessionMessage | null = null;
     let hasCompletedAssistant = false;
@@ -4568,13 +4581,18 @@ class OpenCodeAgentSession implements AgentSession {
       throw new Error(`No pending permission request with id '${requestId}'`);
     }
 
-    const directory = this.pendingPermissionDirectories.get(requestId) ?? this.config.cwd;
+    const directory = this.pendingPermissionDirectories.get(requestId);
+    if (!directory) {
+      throw new Error(`No project directory recorded for permission request '${requestId}'`);
+    }
     if (pending.kind === "question") {
       if (response.behavior === "deny") {
-        await this.client.question.reject({
-          requestID: requestId,
-          directory,
-        });
+        await this.withLeasedProjectOperation(directory, () =>
+          this.client.question.reject({
+            requestID: requestId,
+            directory,
+          }),
+        );
       } else {
         const answersRecord = readOpenCodeRecord(response.updatedInput?.answers);
         const questions = Array.isArray(pending.input?.questions) ? pending.input.questions : [];
@@ -4590,11 +4608,13 @@ class OpenCodeAgentSession implements AgentSession {
             .filter((entry) => entry.length > 0);
         });
 
-        await this.client.question.reply({
-          requestID: requestId,
-          directory,
-          answers,
-        });
+        await this.withLeasedProjectOperation(directory, () =>
+          this.client.question.reply({
+            requestID: requestId,
+            directory,
+            answers,
+          }),
+        );
       }
 
       this.pendingPermissions.delete(requestId);
@@ -4603,12 +4623,14 @@ class OpenCodeAgentSession implements AgentSession {
     }
 
     const reply = resolveOpenCodePermissionReply(response);
-    await this.client.permission.reply({
-      requestID: requestId,
-      directory,
-      reply,
-      message: response.behavior === "deny" ? response.message : undefined,
-    });
+    await this.withLeasedProjectOperation(directory, () =>
+      this.client.permission.reply({
+        requestID: requestId,
+        directory,
+        reply,
+        message: response.behavior === "deny" ? response.message : undefined,
+      }),
+    );
 
     this.pendingPermissions.delete(requestId);
     this.pendingPermissionDirectories.delete(requestId);
@@ -5049,9 +5071,7 @@ class OpenCodeAgentSession implements AgentSession {
     for (const translatedEvent of translated) {
       this.recordProviderInternalEvent(translatedEvent);
       if (translatedEvent.type === "permission_requested") {
-        const directory =
-          (eventSessionId ? this.childSessionCwds.get(eventSessionId) : undefined) ??
-          this.config.cwd;
+        const directory = this.resolveEventSessionDirectory(eventSessionId);
         const autoApproved = await this.tryAutoApproveToolPermission(
           translatedEvent.request,
           directory,
@@ -5140,11 +5160,13 @@ class OpenCodeAgentSession implements AgentSession {
     }
 
     try {
-      await this.client.permission.reply({
-        requestID: request.id,
-        directory,
-        reply: "once",
-      });
+      await this.withLeasedProjectOperation(directory, () =>
+        this.client.permission.reply({
+          requestID: request.id,
+          directory,
+          reply: "once",
+        }),
+      );
       return true;
     } catch (error) {
       this.logger.warn(
@@ -5152,6 +5174,41 @@ class OpenCodeAgentSession implements AgentSession {
         "Failed to auto-approve OpenCode tool permission",
       );
       return false;
+    }
+  }
+
+  private resolveEventSessionDirectory(eventSessionId: string | null): string {
+    if (!eventSessionId || eventSessionId === this.sessionId) {
+      return this.config.cwd;
+    }
+    const directory = this.childSessionCwds.get(eventSessionId);
+    if (!directory) {
+      throw new Error(
+        `OpenCode child session '${eventSessionId}' did not include its project directory`,
+      );
+    }
+    return directory;
+  }
+
+  private async withLeasedProjectOperation<T>(
+    directory: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.matchesSessionDirectory(directory)) {
+      return await operation();
+    }
+    if (!this.projectInstanceLeases) {
+      throw new Error("OpenCode cross-directory operations require the shared lease coordinator");
+    }
+    const lease = await this.projectInstanceLeases.acquire({
+      serverGeneration: this.serverGeneration,
+      directory,
+      client: this.client,
+    });
+    try {
+      return await operation();
+    } finally {
+      await lease.release();
     }
   }
 
