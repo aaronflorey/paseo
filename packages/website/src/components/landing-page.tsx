@@ -1837,8 +1837,9 @@ function FAQ() {
           , connect directly over your local network, or use your own tunnel.
         </FAQItem>
         <FAQItem question="What agents does it support?">
-          Claude Code, Codex, Cursor, OpenCode, and Pi. Each agent runs as its own process using its
-          own CLI or local integration. Paseo doesn&apos;t modify or wrap their behavior.
+          Claude Code, Codex, Cursor, OpenCode, and Pi. They run locally through each
+          provider&apos;s CLI or integration. The local runtime varies by provider; Paseo
+          doesn&apos;t replace the provider&apos;s model or API behavior.
         </FAQItem>
         <FAQItem question="Do I need the desktop app?">
           No. You can run the daemon headless with{" "}
