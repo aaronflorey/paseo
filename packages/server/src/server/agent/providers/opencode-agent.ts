@@ -4178,6 +4178,10 @@ class OpenCodeAgentSession implements AgentSession {
     const subscription = openCodeGlobalEventHub.subscribe({
       serverUrl: this.serverUrl,
       client: this.client,
+      acceptsEvent: (rawEvent) => {
+        const directory = normalizeOpenCodeGlobalEvent(rawEvent)?.directory;
+        return !directory || this.matchesSessionDirectory(directory);
+      },
       onEvent: (rawEvent, eventCount) => this.consumeOpenCodeStreamEvent({ rawEvent, eventCount }),
       onEnd: (error) => this.handleEventStreamEnd(error),
     });

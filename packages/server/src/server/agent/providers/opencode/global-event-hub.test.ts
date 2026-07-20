@@ -71,6 +71,42 @@ describe("OpenCodeGlobalEventHub", () => {
     await vi.waitFor(() => expect(firstListener).toHaveBeenCalledTimes(2));
     await Promise.all([first.close(), second.close()]);
   });
+
+  test("filters irrelevant events before they consume subscriber backlog", async () => {
+    const hub = new OpenCodeGlobalEventHub();
+    const client = new TestOpenCodeClient();
+    const firstEventStarted = createDeferred<void>();
+    const releaseFirstEvent = createDeferred<void>();
+    const listener = vi.fn(async () => {
+      if (listener.mock.calls.length === 1) {
+        firstEventStarted.resolve();
+        await releaseFirstEvent.promise;
+      }
+    });
+    const onEnd = vi.fn();
+    const subscription = hub.subscribe({
+      serverUrl: "http://127.0.0.1:4003",
+      client: client.asSdkClient(),
+      acceptsEvent: (rawEvent) =>
+        typeof rawEvent === "object" && rawEvent !== null && "deliver" in rawEvent,
+      onEvent: listener,
+      onEnd,
+    });
+    await subscription.ready;
+
+    client.emitEvent({ type: "first", deliver: true });
+    await firstEventStarted.promise;
+    for (let index = 0; index < 1_025; index += 1) {
+      client.emitEvent({ type: "irrelevant", index });
+    }
+    client.emitEvent({ type: "second", deliver: true });
+
+    releaseFirstEvent.resolve();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+    expect(onEnd).not.toHaveBeenCalled();
+
+    await subscription.close();
+  });
 });
 
 function createDeferred<T>(): {

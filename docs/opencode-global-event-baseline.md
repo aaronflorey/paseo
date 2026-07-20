@@ -26,6 +26,8 @@ The global stream can deliver legacy event objects, flat sync records (`{ type: 
 
 OpenCode can mirror the same logical update through more than one event family. The adapter streams deltas immediately, emits only residual final content, and bounds its upstream-event identity registry to 4,096 entries per session. Unknown same-directory sessions are held briefly because child output can precede the event that establishes the parent relationship; cross-directory events are rejected before that routing step.
 
+Paseo shares one `/global/event` connection across OpenCode sessions on the same server. Each session's directory predicate must run before the event enters that subscriber's serialized backlog. Filtering only inside the subscriber callback lets unrelated project traffic exhaust the backlog and permanently detach the session, which stops both foreground reasoning and provider-subagent updates.
+
 ## Baseline
 
 Before the provider change, the OpenCode matrix had 16 passing files and 4 failing files:

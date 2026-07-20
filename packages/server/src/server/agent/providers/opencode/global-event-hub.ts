@@ -30,6 +30,7 @@ interface OpenCodeGlobalEventListener {
   closed: boolean;
   eventChain: Promise<void>;
   pendingEvents: number;
+  acceptsEvent: (rawEvent: unknown) => boolean;
   onEvent: (rawEvent: unknown, eventCount: number) => Promise<void>;
   onEnd: (error: unknown) => Promise<void> | void;
 }
@@ -53,6 +54,7 @@ class OpenCodeGlobalEventGeneration {
   }
 
   subscribe(options: {
+    acceptsEvent?: OpenCodeGlobalEventListener["acceptsEvent"];
     onEvent: OpenCodeGlobalEventListener["onEvent"];
     onEnd: OpenCodeGlobalEventListener["onEnd"];
   }): OpenCodeGlobalEventSubscription {
@@ -62,7 +64,9 @@ class OpenCodeGlobalEventGeneration {
       closed: false,
       eventChain: Promise.resolve(),
       pendingEvents: 0,
-      ...options,
+      acceptsEvent: options.acceptsEvent ?? (() => true),
+      onEvent: options.onEvent,
+      onEnd: options.onEnd,
     };
     this.listeners.add(listener);
     if (this.ready) {
@@ -145,6 +149,18 @@ class OpenCodeGlobalEventGeneration {
     if (listener.closed) {
       return;
     }
+    try {
+      if (!listener.acceptsEvent(rawEvent)) {
+        return;
+      }
+    } catch (error) {
+      this.listeners.delete(listener);
+      void this.endListener(listener, error);
+      if (this.listeners.size === 0) {
+        this.abortController.abort();
+      }
+      return;
+    }
     if (listener.pendingEvents >= OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT) {
       this.listeners.delete(listener);
       void this.endListener(
@@ -217,6 +233,7 @@ export class OpenCodeGlobalEventHub {
   subscribe(options: {
     serverUrl?: string;
     client: OpencodeClient;
+    acceptsEvent?: OpenCodeGlobalEventListener["acceptsEvent"];
     onEvent: OpenCodeGlobalEventListener["onEvent"];
     onEnd: OpenCodeGlobalEventListener["onEnd"];
   }): OpenCodeGlobalEventSubscription {
