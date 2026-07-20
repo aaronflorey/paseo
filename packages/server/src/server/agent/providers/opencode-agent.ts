@@ -120,6 +120,7 @@ const OPENCODE_LEGACY_FULL_ACCESS_MODE_ID = "full-access";
 const OPENCODE_AUTO_ACCEPT_FEATURE_ID = "auto_accept";
 const OPENCODE_PERSISTED_SESSION_LIMIT = 200;
 const OPENCODE_PENDING_ABORT_START_TIMEOUT_MS = 10_000;
+const OPENCODE_CLOSE_ABORT_TIMEOUT_MS = 2_000;
 const OPENCODE_CHILD_SESSION_HYDRATION_LIMIT = 100;
 const OPENCODE_CHILD_SESSION_SERVER_REGISTRY_LIMIT = 500;
 const OPENCODE_UNRELATED_SESSION_REGISTRY_LIMIT = 500;
@@ -559,10 +560,14 @@ async function abortOpenCodeSession(params: {
   const { client, sessionId, directory, logger } = params;
 
   try {
-    const response = await client.session.abort({
-      sessionID: sessionId,
-      directory,
-    });
+    const response = await withTimeout(
+      client.session.abort({
+        sessionID: sessionId,
+        directory,
+      }),
+      OPENCODE_CLOSE_ABORT_TIMEOUT_MS,
+      `OpenCode session.abort remained unconfirmed after ${OPENCODE_CLOSE_ABORT_TIMEOUT_MS}ms during close`,
+    );
     if (response.error && !isOpenCodeNotFoundError(response.error)) {
       logger.warn(
         {
@@ -1334,6 +1339,7 @@ function buildOpenCodeReplayTimelineEvents(
 }
 
 export const __openCodeInternals = {
+  abortOpenCodeSession,
   buildOpenCodePromptParts,
   buildOpenCodeSessionTimeline,
   buildOpenCodeModelContextWindowLookup,

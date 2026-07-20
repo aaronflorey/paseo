@@ -16,7 +16,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [005](005-lease-child-session-directories.md)     | Lease child-session operations by directory        | P1       | L      | 004                          | DONE   |
 | [006](006-drain-event-callbacks.md)               | Drain in-flight global-event callbacks             | P1       | M      | —                            | DONE   |
 | [007](007-reconnect-global-event-streams.md)      | Reconnect dead global event streams                | P1       | L      | 006                          | DONE   |
-| [008](008-bound-close-abort.md)                   | Bound OpenCode abort during close                  | P1       | S      | 006                          | TODO   |
+| [008](008-bound-close-abort.md)                   | Bound OpenCode abort during close                  | P1       | S      | 006                          | DONE   |
 | [009](009-retain-force-kill-process-record.md)    | Retain unconfirmed managed-process records         | P1       | S      | —                            | TODO   |
 | [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | TODO   |
 | [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | TODO   |

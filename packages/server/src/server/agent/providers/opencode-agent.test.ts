@@ -213,6 +213,106 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     rmSync(cwd, { recursive: true, force: true });
   }, 60_000);
 
+  test("bounds a hanging close abort and releases session resources", async () => {
+    vi.useFakeTimers();
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const openCode = new TestOpenCodeClient();
+    openCode.sessionCreateResponse = { data: { id: "ses_close_abort_timeout" } };
+    const abortResult = createTestDeferred<{ data: true; error: undefined }>();
+    const sdkClient = openCode.asSdkClient();
+    Object.assign(sdkClient.session, {
+      abort: vi.fn((parameters: unknown) => {
+        openCode.calls.sessionAbort.push(parameters);
+        return abortResult.promise;
+      }),
+    });
+    const closeLogger = createTestLogger();
+    const warn = vi.spyOn(closeLogger, "warn");
+    vi.spyOn(closeLogger, "child").mockReturnValue(closeLogger);
+    const client = new OpenCodeAgentClient(closeLogger, undefined, {
+      serverManager: runtime,
+      createClient: () => sdkClient,
+    });
+    const session = await client.createSession(buildConfig(cwd), {
+      env: { PASEO_AGENT_ID: "close-timeout-agent" },
+    });
+
+    try {
+      let closeSettled = false;
+      const closePromise = session.close().then(() => {
+        closeSettled = true;
+        return undefined;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(openCode.calls.sessionAbort).toEqual([
+        { sessionID: "ses_close_abort_timeout", directory: cwd },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(closeSettled).toBe(false);
+      expect(runtime.acquisitions[0]?.releaseCount).toBe(0);
+      expect(openCodeSessionContextRegistry.resolve("ses_close_abort_timeout")).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await closePromise;
+      expect(runtime.acquisitions[0]?.releaseCount).toBe(1);
+      expect(openCodeSessionContextRegistry.resolve("ses_close_abort_timeout")).toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(
+        {
+          sessionId: "ses_close_abort_timeout",
+          error: "OpenCode session.abort remained unconfirmed after 2000ms during close",
+        },
+        "Failed to abort OpenCode session during close",
+      );
+
+      abortResult.reject(new Error("late abort rejection"));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves close abort warning policy for provider outcomes", async () => {
+    const helperLogger = createTestLogger();
+    const warn = vi.spyOn(helperLogger, "warn");
+    const abort = vi.fn();
+    const client = { session: { abort } } as never;
+    const input = {
+      client,
+      sessionId: "ses_abort_policy",
+      directory: "/workspace/repo",
+      logger: helperLogger,
+    };
+
+    abort.mockResolvedValueOnce({ data: true, error: undefined });
+    await __openCodeInternals.abortOpenCodeSession(input);
+    expect(warn).not.toHaveBeenCalled();
+
+    abort.mockResolvedValueOnce({
+      data: undefined,
+      error: { name: "NotFoundError", message: "already gone" },
+    });
+    await __openCodeInternals.abortOpenCodeSession(input);
+    expect(warn).not.toHaveBeenCalled();
+
+    abort.mockResolvedValueOnce({ data: undefined, error: new Error("abort response failed") });
+    await __openCodeInternals.abortOpenCodeSession(input);
+    expect(warn).toHaveBeenLastCalledWith(
+      { sessionId: "ses_abort_policy", error: "abort response failed" },
+      "Failed to abort OpenCode session during close",
+    );
+
+    abort.mockRejectedValueOnce(new Error("abort request threw"));
+    await __openCodeInternals.abortOpenCodeSession(input);
+    expect(warn).toHaveBeenLastCalledWith(
+      { sessionId: "ses_abort_policy", error: "abort request threw" },
+      "Failed to abort OpenCode session during close",
+    );
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
   test("shares project instance leases across clients using the same helper", async () => {
     const sharedDirectory = tmpCwd();
     const firstDirectory = tmpCwd();
