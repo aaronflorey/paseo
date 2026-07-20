@@ -537,6 +537,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         { timeoutMs: OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS },
         "OpenCode server did not report exit after SIGKILL",
       );
+      return;
     }
     if (server.managedProcessId) {
       await this.removeManagedProcessId(server.managedProcessId);

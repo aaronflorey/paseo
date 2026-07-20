@@ -14,7 +14,11 @@ import type {
   ManagedProcessRegistry,
   ManagedProcessReapResult,
 } from "../../managed-processes/managed-processes.js";
-import type { ProcessTerminator, TreeKillTarget } from "../../../utils/tree-kill.js";
+import type {
+  ProcessTerminator,
+  TerminateWithTreeKillResult,
+  TreeKillTarget,
+} from "../../../utils/tree-kill.js";
 import {
   __openCodeServerManagerInternals,
   OpenCodeServerManager,
@@ -292,6 +296,65 @@ describe("OpenCodeServerManager managed process ledger", () => {
     expect(await runtime.managedProcesses.list()).toEqual([]);
   });
 
+  test("retains a helper record until exit after an unconfirmed force kill", async () => {
+    const { logger, manager, runtime } = createTestManager([4605], {
+      terminateResult: "kill-timeout",
+    });
+    const warn = vi.spyOn(logger, "warn");
+    const acquisition = await manager.acquireCurrent();
+    await runtime.settle();
+
+    await manager.shutdown();
+
+    expect(runtime.terminatedPorts).toEqual([4605]);
+    expect(await runtime.managedProcesses.list()).toEqual([
+      expect.objectContaining({
+        id: "managed-process-1",
+        pid: 14_605,
+        metadata: { port: 4605 },
+      }),
+    ]);
+    expect(warn).toHaveBeenCalledWith(
+      { timeoutMs: 1_000 },
+      "OpenCode server did not report exit after SIGKILL",
+    );
+    expect(manager.acquireExisting(acquisition.server.url)).toBe(null);
+
+    runtime.processForPort(4605).exitNormally();
+    await runtime.settle();
+
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+    expect(runtime.managedProcesses.removedIds).toEqual(["managed-process-1"]);
+  });
+
+  test("retains a pending helper record after an unconfirmed force kill", async () => {
+    const { manager, runtime } = createTestManager([4606], {
+      deferManagedProcessRecord: true,
+      terminateResult: "kill-timeout",
+    });
+    const acquisition = await manager.acquireCurrent();
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+
+    await manager.shutdown();
+    runtime.managedProcesses.resolvePendingRecords();
+    await runtime.settle();
+
+    expect(await runtime.managedProcesses.list()).toEqual([
+      expect.objectContaining({
+        id: "managed-process-1",
+        pid: 14_606,
+        metadata: { port: 4606 },
+      }),
+    ]);
+    expect(manager.acquireExisting(acquisition.server.url)).toBe(null);
+
+    runtime.processForPort(4606).exitNormally();
+    await runtime.settle();
+
+    expect(await runtime.managedProcesses.list()).toEqual([]);
+    expect(runtime.managedProcesses.removedIds).toEqual(["managed-process-1"]);
+  });
+
   test("starts helper server from opencode-home", async () => {
     const tempDir = mkdtempSync(path.join(os.tmpdir(), "opencode-server-home-"));
     const opencodeHomeDir = path.join(tempDir, "opencode-home");
@@ -543,20 +606,26 @@ function createTestManager(
   ports: number[],
   options: {
     autoAnnounce?: boolean;
+    deferManagedProcessRecord?: boolean;
     opencodeHomeDir?: string;
     sharedLaunchEnv?: Record<string, string>;
+    terminateResult?: TerminateWithTreeKillResult;
   } = {},
 ): {
+  logger: ReturnType<typeof createTestLogger>;
   manager: OpenCodeServerManager;
   runtime: FakeOpenCodeServerRuntime;
 } {
   const { opencodeHomeDir } = options;
+  const logger = createTestLogger();
   const runtime = new FakeOpenCodeServerRuntime(ports, {
     autoAnnounce: options.autoAnnounce ?? true,
+    deferManagedProcessRecord: options.deferManagedProcessRecord ?? false,
+    terminateResult: options.terminateResult ?? "terminated",
   });
   return {
     manager: new OpenCodeServerManager({
-      logger: createTestLogger(),
+      logger,
       managedProcesses: runtime.managedProcesses,
       portAllocator: runtime.allocatePort,
       resolveCommandPrefix: runtime.resolveCommandPrefix,
@@ -567,12 +636,13 @@ function createTestManager(
       spawnServerProcess: runtime.spawnServerProcess,
       terminateProcess: runtime.terminateProcess,
     }),
+    logger,
     runtime,
   };
 }
 
 class FakeOpenCodeServerRuntime {
-  readonly managedProcesses = new FakeManagedProcesses();
+  readonly managedProcesses: FakeManagedProcesses;
   readonly lifecycleEvents: string[] = [];
   readonly terminatedPorts: number[] = [];
   readonly spawnCalls: Array<{
@@ -582,12 +652,22 @@ class FakeOpenCodeServerRuntime {
   }> = [];
   private readonly ports: number[];
   private readonly autoAnnounce: boolean;
+  private readonly terminateResult: TerminateWithTreeKillResult;
   private readonly processesByChild = new Map<ChildProcess, FakeOpenCodeProcess>();
   private readonly processesByPort = new Map<number, FakeOpenCodeProcess>();
 
-  constructor(ports: number[], options: { autoAnnounce: boolean }) {
+  constructor(
+    ports: number[],
+    options: {
+      autoAnnounce: boolean;
+      deferManagedProcessRecord?: boolean;
+      terminateResult?: TerminateWithTreeKillResult;
+    },
+  ) {
     this.ports = [...ports];
     this.autoAnnounce = options.autoAnnounce;
+    this.terminateResult = options.terminateResult ?? "terminated";
+    this.managedProcesses = new FakeManagedProcesses(options.deferManagedProcessRecord ?? false);
   }
 
   get launchedPorts(): number[] {
@@ -623,8 +703,10 @@ class FakeOpenCodeServerRuntime {
     const process = this.processForChild(target as ChildProcess);
     this.lifecycleEvents.push("terminate-helper");
     this.terminatedPorts.push(process.port);
-    process.exitBySignal("SIGTERM");
-    return "terminated";
+    if (this.terminateResult !== "kill-timeout") {
+      process.exitBySignal("SIGTERM");
+    }
+    return this.terminateResult;
   };
 
   processForPort(port: number): FakeOpenCodeProcess {
@@ -692,11 +774,34 @@ class FakeOpenCodeProcess extends EventEmitter {
 }
 
 class FakeManagedProcesses implements ManagedProcessRegistry {
+  readonly removedIds: string[] = [];
   private records: ManagedProcessRecord[] = [];
+  private readonly pendingRecords: Array<{
+    input: ManagedProcessRecordInput;
+    resolve: (record: ManagedProcessRecord) => void;
+  }> = [];
+  private nextRecordId = 1;
+
+  constructor(private readonly deferRecords = false) {}
 
   async record(input: ManagedProcessRecordInput): Promise<ManagedProcessRecord> {
+    if (this.deferRecords) {
+      return await new Promise((resolve) => {
+        this.pendingRecords.push({ input, resolve });
+      });
+    }
+    return this.createRecord(input);
+  }
+
+  resolvePendingRecords(): void {
+    for (const pending of this.pendingRecords.splice(0)) {
+      pending.resolve(this.createRecord(pending.input));
+    }
+  }
+
+  private createRecord(input: ManagedProcessRecordInput): ManagedProcessRecord {
     const record: ManagedProcessRecord = {
-      id: `managed-process-${this.records.length + 1}`,
+      id: `managed-process-${this.nextRecordId++}`,
       ...input,
       metadata: input.metadata ?? {},
       identity: { commandLine: null, startedAt: null },
@@ -707,6 +812,7 @@ class FakeManagedProcesses implements ManagedProcessRegistry {
   }
 
   async remove(id: string): Promise<void> {
+    this.removedIds.push(id);
     this.records = this.records.filter((record) => record.id !== id);
   }
 
