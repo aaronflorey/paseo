@@ -127,8 +127,47 @@ const OPENCODE_PROCESSED_EVENT_ID_LIMIT = 4_096;
 const OPENCODE_UNKNOWN_SESSION_EVENT_TTL_MS = 5_000;
 const OPENCODE_UNKNOWN_SESSION_EVENT_LIMIT = 64;
 const OPENCODE_UNKNOWN_SESSION_LIMIT = 100;
+const OPENCODE_EVENT_STREAM_RECONNECT_INITIAL_DELAY_MS = 100;
+const OPENCODE_EVENT_STREAM_RECONNECT_MAX_DELAY_MS = 5_000;
 const OPENCODE_PERMISSION_ACTION_ALLOW_ONCE = "allow_once";
 const OPENCODE_PERMISSION_ACTION_ALLOW_ALWAYS = "allow_always";
+
+interface OpenCodeEventStreamReadyState {
+  promise: Promise<void>;
+  resolve: () => void;
+}
+
+function createOpenCodeEventStreamReadyState(): OpenCodeEventStreamReadyState {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function resolveOpenCodeEventStreamReconnectDelayMs(attempt: number): number {
+  const exponent = Math.max(0, Math.min(attempt - 1, 30));
+  return Math.min(
+    OPENCODE_EVENT_STREAM_RECONNECT_INITIAL_DELAY_MS * 2 ** exponent,
+    OPENCODE_EVENT_STREAM_RECONNECT_MAX_DELAY_MS,
+  );
+}
+
+function waitForOpenCodeEventStreamReconnectDelay(
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+  const delay = createOpenCodeEventStreamReadyState();
+  const timeout = setTimeout(delay.resolve, delayMs);
+  signal.addEventListener("abort", delay.resolve, { once: true });
+  return delay.promise.finally(() => {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", delay.resolve);
+  });
+}
 
 function toOpenCodeSessionContext(
   launchContext: AgentLaunchContext | undefined,
@@ -1304,6 +1343,7 @@ export const __openCodeInternals = {
   hasNormalizedOpenCodeUsage,
   mergeOpenCodeStepFinishUsage,
   parseOpenCodeModelLookupKey,
+  resolveOpenCodeEventStreamReconnectDelayMs,
   resolveOpenCodeModelLookupKeyFromAssistantMessage,
   resolveOpenCodeSelectedModelContextWindow,
   isSelectableOpenCodeAgent,
@@ -3603,8 +3643,10 @@ class OpenCodeAgentSession implements AgentSession {
   private selectedModelContextWindowMaxTokens: number | undefined;
   private releaseServer: (() => Promise<void>) | null;
   private eventStreamSubscription: OpenCodeGlobalEventSubscription | null = null;
-  private eventStreamReady: Promise<void> | null = null;
-  private eventStreamTask: Promise<void> | null = null;
+  private eventStreamSubscriptionReady = false;
+  private eventStreamReadyState: OpenCodeEventStreamReadyState | null = null;
+  private eventStreamReconnectAbortController: AbortController | null = null;
+  private eventStreamReconnectTask: Promise<void> | null = null;
   private suppressTerminalUntilNextUserMessage = false;
   private closed = false;
   private readonly persistSession: boolean;
@@ -3800,6 +3842,9 @@ class OpenCodeAgentSession implements AgentSession {
 
     try {
       await this.ensureEventStreamReady();
+      if (this.closed) {
+        throw new Error("OpenCode session closed before the event stream was ready");
+      }
     } catch (error) {
       if (this.abortController === turnAbortController) {
         this.abortController = null;
@@ -4166,20 +4211,100 @@ class OpenCodeAgentSession implements AgentSession {
 
   private startEventStream(): void {
     void this.ensureEventStreamReady().catch((error) => {
+      if (this.closed) {
+        return;
+      }
       this.logger.warn({ err: error, sessionId: this.sessionId }, "OpenCode event stream failed");
     });
   }
 
   private ensureEventStreamReady(): Promise<void> {
-    if (this.eventStreamReady) {
-      return this.eventStreamReady;
+    if (this.closed) {
+      return Promise.reject(new Error("OpenCode session closed before the event stream was ready"));
     }
+    const readyState = this.getOrCreateEventStreamReadyState();
+    this.startEventStreamReconnectLoop();
+    return readyState.promise;
+  }
 
+  private getOrCreateEventStreamReadyState(): OpenCodeEventStreamReadyState {
+    if (!this.eventStreamReadyState) {
+      this.eventStreamReadyState = createOpenCodeEventStreamReadyState();
+    }
+    return this.eventStreamReadyState;
+  }
+
+  private startEventStreamReconnectLoop(): void {
+    if (this.eventStreamReconnectTask || this.closed) {
+      return;
+    }
+    const abortController = new AbortController();
+    this.eventStreamReconnectAbortController = abortController;
+    const reconnectTask = this.runEventStreamReconnectLoop(abortController.signal).finally(() => {
+      if (this.eventStreamReconnectAbortController === abortController) {
+        this.eventStreamReconnectAbortController = null;
+      }
+      if (this.eventStreamReconnectTask === reconnectTask) {
+        this.eventStreamReconnectTask = null;
+      }
+    });
+    this.eventStreamReconnectTask = reconnectTask;
+    void reconnectTask.catch((error) => {
+      if (this.closed) {
+        return;
+      }
+      this.logger.warn(
+        { err: error, sessionId: this.sessionId },
+        "OpenCode event stream reconnect loop failed",
+      );
+    });
+  }
+
+  private async runEventStreamReconnectLoop(signal: AbortSignal): Promise<void> {
+    let retryAttempt = 0;
+    while (!this.closed && !signal.aborted) {
+      if (retryAttempt > 0) {
+        await waitForOpenCodeEventStreamReconnectDelay(
+          resolveOpenCodeEventStreamReconnectDelayMs(retryAttempt),
+          signal,
+        );
+        if (this.closed || signal.aborted) {
+          return;
+        }
+      }
+
+      const subscription = this.createEventStreamSubscription();
+      try {
+        await subscription.ready;
+        if (this.closed || signal.aborted || this.eventStreamSubscription !== subscription) {
+          await subscription.close();
+          return;
+        }
+        this.eventStreamSubscriptionReady = true;
+        retryAttempt = 0;
+        this.getOrCreateEventStreamReadyState().resolve();
+        this.traceOpenCode("provider.opencode.subscribe.ready", {
+          sessionId: this.sessionId,
+        });
+        await subscription.done;
+      } catch {
+        await subscription.done.catch(() => undefined);
+      }
+
+      if (this.closed || signal.aborted) {
+        return;
+      }
+      retryAttempt += 1;
+    }
+  }
+
+  private createEventStreamSubscription(): OpenCodeGlobalEventSubscription {
     this.traceOpenCode("provider.opencode.subscribe.start", {
       sessionId: this.sessionId,
       cwd: this.config.cwd,
     });
-    const subscription = openCodeGlobalEventHub.subscribe({
+    let subscription!: OpenCodeGlobalEventSubscription;
+    subscription = openCodeGlobalEventHub.subscribe({
       serverUrl: this.serverUrl,
       client: this.client,
       acceptsEvent: (rawEvent) => {
@@ -4187,37 +4312,27 @@ class OpenCodeAgentSession implements AgentSession {
         return !directory || this.matchesSessionDirectory(directory);
       },
       onEvent: (rawEvent, eventCount) => this.consumeOpenCodeStreamEvent({ rawEvent, eventCount }),
-      onEnd: (error) => this.handleEventStreamEnd(error),
+      onEnd: (error) => this.handleEventStreamEnd(subscription, error),
     });
     this.eventStreamSubscription = subscription;
-    const eventStreamReady = subscription.ready.then(() => {
-      this.traceOpenCode("provider.opencode.subscribe.ready", {
-        sessionId: this.sessionId,
-      });
-      return undefined;
-    });
-    this.eventStreamReady = eventStreamReady;
-    const eventStreamTask = subscription.done.finally(() => {
-      if (this.eventStreamSubscription === subscription) {
-        this.eventStreamSubscription = null;
-        this.eventStreamReady = null;
-      }
-      if (this.eventStreamTask === eventStreamTask) {
-        this.eventStreamTask = null;
-      }
-    });
-    this.eventStreamTask = eventStreamTask;
-    void eventStreamTask.catch((error) => {
-      this.logger.warn(
-        { err: error, sessionId: this.sessionId },
-        "OpenCode event stream task failed",
-      );
-    });
-
-    return eventStreamReady;
+    this.eventStreamSubscriptionReady = false;
+    return subscription;
   }
 
-  private handleEventStreamEnd(error: unknown): void {
+  private handleEventStreamEnd(
+    subscription: OpenCodeGlobalEventSubscription,
+    error: unknown,
+  ): void {
+    if (this.eventStreamSubscription !== subscription) {
+      return;
+    }
+    const wasReady = this.eventStreamSubscriptionReady;
+    this.eventStreamSubscription = null;
+    this.eventStreamSubscriptionReady = false;
+    if (wasReady) {
+      this.eventStreamReadyState = createOpenCodeEventStreamReadyState();
+    }
+
     this.traceOpenCode("provider.opencode.subscribe.error", {
       turnId: this.activeForegroundTurnId ?? undefined,
       error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
@@ -4657,19 +4772,23 @@ class OpenCodeAgentSession implements AgentSession {
       // unhandled rejection in whichever test the daemon hops to next.
       this.closed = true;
       this.abortController?.abort();
-      const eventStreamTask = this.eventStreamTask;
+      const eventStreamReconnectTask = this.eventStreamReconnectTask;
+      this.eventStreamReconnectAbortController?.abort();
+      this.eventStreamReadyState?.resolve();
       await this.eventStreamSubscription?.close();
-      if (eventStreamTask) {
-        await eventStreamTask.catch((error) => {
+      if (eventStreamReconnectTask) {
+        await eventStreamReconnectTask.catch((error) => {
           this.logger.debug(
             { err: error, sessionId: this.sessionId },
-            "OpenCode event stream failed during close",
+            "OpenCode event stream reconnect loop failed during close",
           );
         });
       }
       this.eventStreamSubscription = null;
-      this.eventStreamReady = null;
-      this.eventStreamTask = null;
+      this.eventStreamSubscriptionReady = false;
+      this.eventStreamReadyState = null;
+      this.eventStreamReconnectAbortController = null;
+      this.eventStreamReconnectTask = null;
       this.subscribers.clear();
       await abortOpenCodeSession({
         client: this.client,

@@ -1731,6 +1731,305 @@ describe("OpenCode adapter startTurn error handling", () => {
     await closePromise;
   });
 
+  test("invalidates dead readiness before turn failure observers can start again", async () => {
+    vi.useFakeTimers();
+    const firstStream = createTestControlledEventStream();
+    const secondStream = createTestControlledEventStream();
+    const streams = [firstStream, secondStream];
+    let streamIndex = 0;
+    let openedReplacementBeforeDrain = false;
+    const fakeClient = {
+      global: {
+        event: vi.fn().mockImplementation(async ({ signal }: { signal: AbortSignal }) => {
+          const stream = streams[streamIndex++];
+          if (!stream) {
+            throw new Error("unexpected extra global stream");
+          }
+          if (stream === secondStream) {
+            openedReplacementBeforeDrain = !firstStream.ended;
+          }
+          return { stream: stream.open(signal) };
+        }),
+      },
+      session: {
+        abort: vi.fn().mockResolvedValue({ data: true, error: undefined }),
+        promptAsync: vi.fn().mockResolvedValue({ data: {}, error: undefined }),
+        update: vi.fn().mockResolvedValue({ data: {}, error: undefined }),
+      },
+    } as never;
+    const session = new __openCodeInternals.OpenCodeAgentSession(
+      { provider: "opencode", cwd: "/tmp/test" },
+      fakeClient,
+      "ses_reconnect_turn",
+      createTestLogger(),
+    );
+    const events: AgentStreamEvent[] = [];
+    const firstMessage = createTestDeferred<void>();
+    const firstTurnFailed = createTestDeferred<void>();
+    const secondTurnCompleted = createTestDeferred<void>();
+    let secondTurnPromise: ReturnType<typeof session.startTurn> | null = null;
+    session.subscribe((event) => {
+      events.push(event);
+      if (
+        event.type === "timeline" &&
+        event.item.type === "assistant_message" &&
+        event.item.text === "Before disconnect"
+      ) {
+        firstMessage.resolve();
+      }
+      if (event.type === "turn_failed" && !secondTurnPromise) {
+        secondTurnPromise = session.startTurn("second prompt");
+        firstTurnFailed.resolve();
+      }
+      if (event.type === "turn_completed" && event.turnId === "opencode-turn-1") {
+        secondTurnCompleted.resolve();
+      }
+    });
+
+    try {
+      await session.startTurn("first prompt");
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(1);
+      expect(fakeClient.session.promptAsync).toHaveBeenCalledTimes(1);
+
+      const replayedMessage = {
+        directory: "/tmp/test",
+        payload: {
+          id: "evt_message_before_disconnect",
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "msg_before_disconnect",
+              sessionID: "ses_reconnect_turn",
+              role: "assistant",
+            },
+          },
+        },
+      };
+      const replayedPart = {
+        directory: "/tmp/test",
+        payload: {
+          id: "evt_part_before_disconnect",
+          type: "message.part.delta",
+          properties: {
+            sessionID: "ses_reconnect_turn",
+            messageID: "msg_before_disconnect",
+            partID: "prt_before_disconnect",
+            field: "text",
+            delta: "Before disconnect",
+          },
+        },
+      };
+      firstStream.emit(replayedMessage);
+      firstStream.emit(replayedPart);
+      await firstMessage.promise;
+
+      firstStream.end();
+      await firstTurnFailed.promise;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(1);
+      expect(fakeClient.session.promptAsync).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(2);
+      expect(openedReplacementBeforeDrain).toBe(false);
+      if (!secondTurnPromise) {
+        throw new Error("turn failure observer did not start the replacement turn");
+      }
+      await secondTurnPromise;
+      expect(fakeClient.session.promptAsync).toHaveBeenCalledTimes(2);
+
+      secondStream.emit(replayedMessage);
+      secondStream.emit(replayedPart);
+      secondStream.emit({
+        directory: "/tmp/test",
+        payload: {
+          type: "session.status",
+          properties: { sessionID: "ses_reconnect_turn", status: { type: "idle" } },
+        },
+      });
+      await secondTurnCompleted.promise;
+
+      expect(events.filter((event) => event.type === "turn_failed")).toHaveLength(1);
+      expect(
+        events.filter(
+          (event) =>
+            event.type === "timeline" &&
+            event.item.type === "assistant_message" &&
+            event.item.text === "Before disconnect",
+        ),
+      ).toHaveLength(1);
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("reconnects an idle externally driven session without a new prompt", async () => {
+    vi.useFakeTimers();
+    const firstStream = createTestControlledEventStream();
+    const secondStream = createTestControlledEventStream();
+    const streams = [firstStream, secondStream];
+    let streamIndex = 0;
+    const fakeClient = {
+      global: {
+        event: vi.fn().mockImplementation(async ({ signal }: { signal: AbortSignal }) => {
+          const stream = streams[streamIndex++];
+          if (!stream) {
+            throw new Error("unexpected extra global stream");
+          }
+          return { stream: stream.open(signal) };
+        }),
+      },
+      session: {
+        abort: vi.fn().mockResolvedValue({ data: true, error: undefined }),
+        update: vi.fn().mockResolvedValue({ data: {}, error: undefined }),
+      },
+    } as never;
+    const session = new __openCodeInternals.OpenCodeAgentSession(
+      { provider: "opencode", cwd: "/tmp/test" },
+      fakeClient,
+      "ses_external_reconnect",
+      createTestLogger(),
+      new Map(),
+      undefined,
+      true,
+      undefined,
+      undefined,
+      true,
+    );
+    const events: AgentStreamEvent[] = [];
+    const completed = createTestDeferred<void>();
+    session.subscribe((event) => {
+      events.push(event);
+      if (event.type === "turn_completed") {
+        completed.resolve();
+      }
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(1);
+      firstStream.end();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(2);
+
+      secondStream.emit({
+        directory: "/tmp/test",
+        payload: {
+          type: "session.status",
+          properties: { sessionID: "ses_external_reconnect", status: { type: "busy" } },
+        },
+      });
+      secondStream.emit({
+        directory: "/tmp/test",
+        payload: {
+          type: "message.updated",
+          properties: {
+            info: {
+              id: "msg_external_reconnect",
+              sessionID: "ses_external_reconnect",
+              role: "assistant",
+            },
+          },
+        },
+      });
+      secondStream.emit({
+        directory: "/tmp/test",
+        payload: {
+          type: "message.part.delta",
+          properties: {
+            sessionID: "ses_external_reconnect",
+            messageID: "msg_external_reconnect",
+            partID: "prt_external_reconnect",
+            field: "text",
+            delta: "External activity resumed",
+          },
+        },
+      });
+      secondStream.emit({
+        directory: "/tmp/test",
+        payload: {
+          type: "session.status",
+          properties: { sessionID: "ses_external_reconnect", status: { type: "idle" } },
+        },
+      });
+      await completed.promise;
+
+      expect(events.map((event) => event.type)).toEqual([
+        "turn_started",
+        "timeline",
+        "turn_completed",
+      ]);
+      expect(fakeClient.session).not.toHaveProperty("promptAsync");
+      await session.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("uses capped reconnect backoff, resets after ready, and cancels close immediately", async () => {
+    vi.useFakeTimers();
+    const successfulStream = createTestControlledEventStream();
+    let globalEventCall = 0;
+    const fakeClient = {
+      global: {
+        event: vi.fn().mockImplementation(async ({ signal }: { signal: AbortSignal }) => {
+          globalEventCall += 1;
+          if (globalEventCall <= 8 || globalEventCall >= 10) {
+            throw new Error(`connection failure ${globalEventCall}`);
+          }
+          return { stream: successfulStream.open(signal) };
+        }),
+      },
+      session: {
+        abort: vi.fn().mockResolvedValue({ data: true, error: undefined }),
+        promptAsync: vi.fn().mockResolvedValue({ data: {}, error: undefined }),
+        update: vi.fn().mockResolvedValue({ data: {}, error: undefined }),
+      },
+    } as never;
+    const session = new __openCodeInternals.OpenCodeAgentSession(
+      { provider: "opencode", cwd: "/tmp/test" },
+      fakeClient,
+      "ses_backoff_reconnect",
+      createTestLogger(),
+    );
+
+    try {
+      const turnPromise = session.startTurn("wait for reconnect");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(1);
+      const retryDelays = [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000];
+      for (const [index, delay] of retryDelays.entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(fakeClient.global.event).toHaveBeenCalledTimes(index + 1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(fakeClient.global.event).toHaveBeenCalledTimes(index + 2);
+      }
+
+      await turnPromise;
+      expect(fakeClient.session.promptAsync).toHaveBeenCalledTimes(1);
+      expect(__openCodeInternals.resolveOpenCodeEventStreamReconnectDelayMs(7)).toBe(5_000);
+      expect(__openCodeInternals.resolveOpenCodeEventStreamReconnectDelayMs(20)).toBe(5_000);
+
+      successfulStream.end();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(9);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(10);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const closePromise = session.close();
+      await vi.advanceTimersByTimeAsync(0);
+      await closePromise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fakeClient.global.event).toHaveBeenCalledTimes(10);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("streamHistory preserves OpenCode replay timestamps from message and part times", async () => {
     const fakeClient = {
       session: {
@@ -4564,6 +4863,73 @@ function createTestDeferred<T>(): {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function createTestControlledEventStream(): {
+  readonly ended: boolean;
+  open: (signal: AbortSignal) => AsyncIterable<unknown>;
+  emit: (event: unknown) => void;
+  end: () => void;
+} {
+  const queue: Array<IteratorResult<unknown>> = [];
+  const waiters: Array<(result: IteratorResult<unknown>) => void> = [];
+  let ended = false;
+
+  const push = (result: IteratorResult<unknown>) => {
+    const waiter = waiters.shift();
+    if (waiter) {
+      waiter(result);
+      return;
+    }
+    queue.push(result);
+  };
+  const end = () => {
+    if (ended) {
+      return;
+    }
+    ended = true;
+    while (waiters.length > 0) {
+      waiters.shift()?.({ done: true, value: undefined });
+    }
+    if (queue.length === 0) {
+      queue.push({ done: true, value: undefined });
+    }
+  };
+
+  return {
+    get ended() {
+      return ended;
+    },
+    open: (signal) => {
+      if (signal.aborted) {
+        end();
+      } else {
+        signal.addEventListener("abort", end, { once: true });
+      }
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: () => {
+            const result = queue.shift();
+            if (result) {
+              return Promise.resolve(result);
+            }
+            if (ended) {
+              return Promise.resolve({ done: true, value: undefined });
+            }
+            return new Promise<IteratorResult<unknown>>((resolve) => {
+              waiters.push(resolve);
+            });
+          },
+        }),
+      };
+    },
+    emit: (event) => {
+      if (!ended) {
+        push({ done: false, value: event });
+      }
+    },
+    end,
+  };
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
