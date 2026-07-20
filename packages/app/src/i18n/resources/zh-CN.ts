@@ -1409,6 +1409,9 @@ export const zhCN: TranslationResources = {
     backdrop: "菜单背景",
   },
   subagents: {
+    possiblyStalled: "可能已卡住",
+    stallWarning: "已有 {{count}} 分钟无活动，此 OpenCode 运行可能已卡住",
+    stallParentRecovery: "请在父 OpenCode 运行中使用“停止”或“重新加载”。",
     detachAction: "分离 {{label}}",
     detachTooltip: "分离 subagent",
     archiveAction: "归档 {{label}}",

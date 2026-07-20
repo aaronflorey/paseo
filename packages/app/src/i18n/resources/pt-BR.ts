@@ -1456,6 +1456,10 @@ export const ptBR: TranslationResources = {
     backdrop: "Fundo do menu",
   },
   subagents: {
+    possiblyStalled: "Possivelmente travado",
+    stallWarning:
+      "Sem atividade por {{count}} minutos — esta execução do OpenCode pode estar travada",
+    stallParentRecovery: "Use Parar ou Recarregar na execução principal do OpenCode.",
     detachAction: "Desanexar {{label}}",
     detachTooltip: "Desanexar subagente",
     archiveAction: "Arquivar {{label}}",

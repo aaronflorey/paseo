@@ -3,8 +3,13 @@ import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore, type Agent } from "@/stores/session-store";
-import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
+import {
+  providerSubagentParentPrefix,
+  refreshProviderSubagents,
+  useProviderSubagentStore,
+} from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
+import { deriveAgentStateBucket } from "@getpaseo/protocol/agent-state-bucket";
 
 export interface PaseoSubagentRow {
   kind: "paseo";
@@ -14,6 +19,8 @@ export interface PaseoSubagentRow {
   status: Agent["status"];
   requiresAttention: Agent["requiresAttention"];
   createdAt: Agent["createdAt"];
+  lastActivityAt: Agent["lastActivityAt"];
+  isWaitingForInput: boolean;
 }
 
 export interface ProviderSubagentRow {
@@ -25,6 +32,8 @@ export interface ProviderSubagentRow {
   status: ProviderSubagentDescriptorPayload["status"];
   requiresAttention: boolean;
   createdAt: Date;
+  lastActivityAt: Date;
+  isWaitingForInput: boolean;
 }
 
 export type SubagentRow = PaseoSubagentRow | ProviderSubagentRow;
@@ -40,6 +49,23 @@ interface SelectSubagentsParams {
 const EMPTY_SUBAGENT_ROWS: SubagentRow[] = [];
 const EMPTY_PROVIDER_SUBAGENT_ROWS: ProviderSubagentRow[] = [];
 
+export function isAgentWaitingForInput(
+  agent:
+    | Pick<Agent, "status" | "pendingPermissions" | "requiresAttention" | "attentionReason">
+    | null
+    | undefined,
+): boolean {
+  if (!agent) return false;
+  return (
+    deriveAgentStateBucket({
+      status: agent.status,
+      pendingPermissionCount: agent.pendingPermissions.length,
+      requiresAttention: agent.requiresAttention,
+      attentionReason: agent.attentionReason,
+    }) === "needs_input"
+  );
+}
+
 function toSubagentRow(agent: Agent): SubagentRow {
   return {
     kind: "paseo",
@@ -49,6 +75,8 @@ function toSubagentRow(agent: Agent): SubagentRow {
     status: agent.status,
     requiresAttention: agent.requiresAttention,
     createdAt: agent.createdAt,
+    lastActivityAt: agent.lastActivityAt,
+    isWaitingForInput: isAgentWaitingForInput(agent),
   };
 }
 
@@ -86,10 +114,11 @@ export function selectProviderSubagentsForParent(
   state: ProviderSubagentStoreSnapshot,
   params: SelectSubagentsParams,
   supported: boolean,
+  parentIsWaitingForInput = false,
 ): ProviderSubagentRow[] {
   if (!supported) return EMPTY_PROVIDER_SUBAGENT_ROWS;
   const rows: ProviderSubagentRow[] = [];
-  const prefix = `${params.serverId}\0${params.parentAgentId}\0`;
+  const prefix = providerSubagentParentPrefix(params.serverId, params.parentAgentId);
   for (const [key, subagent] of state.descriptors) {
     if (!key.startsWith(prefix) || state.hiddenFromTrack.has(key)) continue;
     rows.push({
@@ -101,6 +130,8 @@ export function selectProviderSubagentsForParent(
       status: subagent.status,
       requiresAttention: subagent.status === "failed",
       createdAt: new Date(subagent.createdAt),
+      lastActivityAt: new Date(subagent.updatedAt),
+      isWaitingForInput: parentIsWaitingForInput,
     });
   }
   rows.sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
@@ -117,9 +148,13 @@ export function useSubagentsForParent(params: SelectSubagentsParams): SubagentRo
   const supported = useSessionStore(
     (state) => state.sessions[params.serverId]?.serverInfo?.features?.providerSubagents === true,
   );
+  const parentIsWaitingForInput = useSessionStore((state) => {
+    const parent = state.sessions[params.serverId]?.agents.get(params.parentAgentId);
+    return isAgentWaitingForInput(parent);
+  });
   const providerRows = useStoreWithEqualityFn(
     useProviderSubagentStore,
-    (state) => selectProviderSubagentsForParent(state, params, supported),
+    (state) => selectProviderSubagentsForParent(state, params, supported, parentIsWaitingForInput),
     equal,
   );
   const client = useSessionStore((state) => state.sessions[params.serverId]?.client ?? null);

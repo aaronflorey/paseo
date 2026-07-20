@@ -22,7 +22,7 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
 
   readonly server = (() => {
     const port = nextTestOpenCodePort++;
-    return { port, url: `http://127.0.0.1:${port}` };
+    return { port, url: `http://127.0.0.1:${port}`, generation: {} };
   })();
 
   enqueueClient(client: TestOpenCodeClient): void {
@@ -78,6 +78,7 @@ export class TestOpenCodeClient {
     eventSubscribe: [] as unknown[],
     experimentalSessionList: [] as unknown[],
     globalEvent: [] as unknown[],
+    instanceDispose: [] as unknown[],
     mcpAdd: [] as unknown[],
     mcpConnect: [] as unknown[],
     permissionReply: [] as unknown[],
@@ -92,6 +93,7 @@ export class TestOpenCodeClient {
     sessionGet: [] as unknown[],
     sessionMessages: [] as unknown[],
     sessionPromptAsync: [] as unknown[],
+    sessionStatus: [] as unknown[],
     sessionSummarize: [] as unknown[],
     sessionUpdate: [] as unknown[],
   };
@@ -100,6 +102,7 @@ export class TestOpenCodeClient {
   commandListResponse: OpenCodeResponse = { data: [] };
   eventStream: AsyncIterable<unknown>;
   experimentalSessionListResponse: OpenCodeResponse = { data: [] };
+  instanceDisposeResponse: OpenCodeResponse = { data: true };
   mcpAddResponse: OpenCodeResponse = {};
   mcpConnectResponse: OpenCodeResponse = {};
   permissionReplyResponse: OpenCodeResponse = {};
@@ -119,8 +122,10 @@ export class TestOpenCodeClient {
     data: { id: "session-1", directory: "/workspace/repo", title: null },
   };
   sessionMessagesResponse: OpenCodeResponse = { data: [] };
+  sessionMessagesImplementation: ((parameters: unknown) => Promise<OpenCodeResponse>) | null = null;
   sessionPromptAsyncEvents: unknown[] = [idleEvent()];
   sessionPromptAsyncResponse: OpenCodeResponse = {};
+  sessionStatusResponse: OpenCodeResponse = { data: {} };
   sessionSummarizeEvents: unknown[] = [idleEvent()];
   sessionSummarizeResponse: OpenCodeResponse = { data: {} };
   sessionUpdateResponse: OpenCodeResponse = {};
@@ -179,6 +184,12 @@ export class TestOpenCodeClient {
           return {
             stream: signal ? stopEventStreamOnAbort(this.eventStream, signal) : this.eventStream,
           };
+        },
+      },
+      instance: {
+        dispose: async (parameters: unknown) => {
+          this.calls.instanceDispose.push(parameters);
+          return this.instanceDisposeResponse;
         },
       },
       mcp: {
@@ -251,7 +262,9 @@ export class TestOpenCodeClient {
         },
         messages: async (parameters: unknown) => {
           this.calls.sessionMessages.push(parameters);
-          return this.sessionMessagesResponse;
+          return this.sessionMessagesImplementation
+            ? await this.sessionMessagesImplementation(parameters)
+            : this.sessionMessagesResponse;
         },
         promptAsync: async (parameters: unknown) => {
           this.calls.sessionPromptAsync.push(parameters);
@@ -259,6 +272,10 @@ export class TestOpenCodeClient {
             this.emitEvent(event);
           }
           return this.sessionPromptAsyncResponse;
+        },
+        status: async (parameters: unknown) => {
+          this.calls.sessionStatus.push(parameters);
+          return this.sessionStatusResponse;
         },
         summarize: async (parameters: unknown) => {
           this.calls.sessionSummarize.push(parameters);

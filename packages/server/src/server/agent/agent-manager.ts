@@ -3427,10 +3427,12 @@ export class AgentManager {
         return undefined;
       case "mode_changed":
         agent.currentModeId = event.currentModeId;
+        agent.config.modeId = event.currentModeId ?? undefined;
         agent.availableModes = event.availableModes;
         if (agent.runtimeInfo) {
           agent.runtimeInfo = { ...agent.runtimeInfo, modeId: event.currentModeId };
         }
+        this.touchUpdatedAt(agent);
         flags.shouldDispatchEvent = false;
         this.emitState(agent);
         return undefined;

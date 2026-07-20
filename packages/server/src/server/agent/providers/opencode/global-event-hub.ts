@@ -1,5 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
+const OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT = 1_024;
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
@@ -26,6 +28,8 @@ interface OpenCodeGlobalEventListener {
   ready: Deferred<void>;
   done: Deferred<void>;
   closed: boolean;
+  eventChain: Promise<void>;
+  pendingEvents: number;
   onEvent: (rawEvent: unknown, eventCount: number) => Promise<void>;
   onEnd: (error: unknown) => Promise<void> | void;
 }
@@ -56,6 +60,8 @@ class OpenCodeGlobalEventGeneration {
       ready: createDeferred<void>(),
       done: createDeferred<void>(),
       closed: false,
+      eventChain: Promise.resolve(),
+      pendingEvents: 0,
       ...options,
     };
     this.listeners.add(listener);
@@ -100,12 +106,11 @@ class OpenCodeGlobalEventGeneration {
           break;
         }
         eventCount += 1;
-        await Promise.all(
-          Array.from(this.listeners, (listener) =>
-            this.deliverEvent(listener, rawEvent, eventCount),
-          ),
-        );
+        for (const listener of this.listeners) {
+          this.enqueueEvent(listener, rawEvent, eventCount);
+        }
       }
+      await Promise.all(Array.from(this.listeners, (listener) => listener.eventChain));
       if (!this.abortController.signal.aborted) {
         terminalError = new Error(
           "OpenCode event stream ended before the session reached a terminal state",
@@ -130,6 +135,36 @@ class OpenCodeGlobalEventGeneration {
         this.finished.resolve();
       }
     }
+  }
+
+  private enqueueEvent(
+    listener: OpenCodeGlobalEventListener,
+    rawEvent: unknown,
+    eventCount: number,
+  ): void {
+    if (listener.closed) {
+      return;
+    }
+    if (listener.pendingEvents >= OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT) {
+      this.listeners.delete(listener);
+      void this.endListener(
+        listener,
+        new Error(
+          `OpenCode event subscriber exceeded the ${OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT}-event backlog limit`,
+        ),
+      );
+      if (this.listeners.size === 0) {
+        this.abortController.abort();
+      }
+      return;
+    }
+
+    listener.pendingEvents += 1;
+    listener.eventChain = listener.eventChain
+      .then(() => this.deliverEvent(listener, rawEvent, eventCount))
+      .finally(() => {
+        listener.pendingEvents = Math.max(0, listener.pendingEvents - 1);
+      });
   }
 
   private async deliverEvent(

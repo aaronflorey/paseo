@@ -1438,6 +1438,9 @@ export const en = {
     backdrop: "Menu backdrop",
   },
   subagents: {
+    possiblyStalled: "Possibly stalled",
+    stallWarning: "No activity for {{count}} minutes—this OpenCode run may be stalled",
+    stallParentRecovery: "Use Stop or Reload on the parent OpenCode run.",
     detachAction: "Detach {{label}}",
     detachTooltip: "Detach subagent",
     archiveAction: "Archive {{label}}",

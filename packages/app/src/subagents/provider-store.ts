@@ -102,7 +102,7 @@ export function refreshProviderSubagents(
   return request;
 }
 
-function parentPrefix(serverId: string, parentAgentId: string): string {
+export function providerSubagentParentPrefix(serverId: string, parentAgentId: string): string {
   return `${serverId}\0${parentAgentId}\0`;
 }
 
@@ -198,7 +198,7 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
   hiddenFromTrack: new Set(),
   hideFinishedForParent(serverId, parentAgentId) {
     set((state) => {
-      const prefix = parentPrefix(serverId, parentAgentId);
+      const prefix = providerSubagentParentPrefix(serverId, parentAgentId);
       const hiddenFromTrack = new Set(state.hiddenFromTrack);
       for (const [key, subagent] of state.descriptors) {
         if (key.startsWith(prefix) && subagent.status !== "running") {
@@ -210,7 +210,7 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
   },
   replaceList(serverId, parentAgentId, subagents) {
     set((state) => {
-      const prefix = parentPrefix(serverId, parentAgentId);
+      const prefix = providerSubagentParentPrefix(serverId, parentAgentId);
       const descriptors = new Map(
         [...state.descriptors].filter(([key]) => !key.startsWith(prefix)),
       );

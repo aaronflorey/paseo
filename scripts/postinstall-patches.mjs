@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 
@@ -7,6 +7,11 @@ import { join, relative } from "node:path";
 // `cwd` is where patch-package must run from. Packages that npm does not hoist to the
 // workspace root live in their workspace's own node_modules, and patch-package resolves
 // the patch's node_modules/... paths relative to its working directory.
+const openCodeSdkVerification = {
+  files: ["dist/gen/core/serverSentEvents.gen.js", "dist/v2/gen/core/serverSentEvents.gen.js"],
+  includes: "void reader.cancel().catch",
+};
+
 const patchedPackages = [
   {
     nodeModulesPath: "node_modules/react-native-markdown-display",
@@ -21,9 +26,15 @@ const patchedPackages = [
     patchPrefix: "react-native-gesture-handler+",
   },
   {
+    nodeModulesPath: "node_modules/@opencode-ai/sdk",
+    patchPrefix: "@opencode-ai+sdk+",
+    verification: openCodeSdkVerification,
+  },
+  {
     nodeModulesPath: "packages/server/node_modules/@opencode-ai/sdk",
     patchPrefix: "@opencode-ai+sdk+",
     cwd: "packages/server",
+    verification: openCodeSdkVerification,
   },
 ];
 
@@ -47,10 +58,6 @@ for (const { patchPrefix, cwd = "." } of installedPackages) {
   const group = patchFilesByCwd.get(cwd) ?? [];
   group.push(...files);
   patchFilesByCwd.set(cwd, group);
-}
-
-if (patchFilesByCwd.size === 0) {
-  process.exit(0);
 }
 
 const isWindows = process.platform === "win32";
@@ -83,6 +90,24 @@ for (const [cwd, files] of patchFilesByCwd) {
   }
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
+  }
+}
+
+for (const { nodeModulesPath, verification } of installedPackages) {
+  if (!verification) {
+    continue;
+  }
+  for (const file of verification.files) {
+    const installedFile = join(nodeModulesPath, file);
+    if (
+      !existsSync(installedFile) ||
+      !readFileSync(installedFile, "utf8").includes(verification.includes)
+    ) {
+      console.error(
+        `postinstall-patches: verification failed for ${installedFile}; expected '${verification.includes}'`,
+      );
+      process.exit(1);
+    }
   }
 }
 

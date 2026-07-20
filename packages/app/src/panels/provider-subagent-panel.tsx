@@ -20,6 +20,8 @@ import type { PendingPermission } from "@/types/shared";
 import type { StreamItem } from "@/types/stream";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { TIMELINE_FETCH_PAGE_SIZE } from "@/timeline/timeline-fetch-policy";
+import { OpenCodeStallNotice } from "@/subagents/opencode-stall-notice";
+import { isAgentWaitingForInput } from "@/subagents/select";
 
 const EMPTY_PERMISSIONS = new Map<string, PendingPermission>();
 const EMPTY_STREAM_ITEMS: StreamItem[] = [];
@@ -41,10 +43,10 @@ function useProviderSubagentDescriptor(
       providerSubagentKey(context.serverId, target.parentAgentId, target.subagentId),
     ),
   );
-  const parentProvider = useSessionStore(
-    (state) => state.sessions[context.serverId]?.agents.get(target.parentAgentId)?.provider,
+  const parent = useSessionStore((state) =>
+    state.sessions[context.serverId]?.agents.get(target.parentAgentId),
   );
-  const provider = descriptor?.provider ?? parentProvider ?? "agent";
+  const provider = descriptor?.provider ?? parent?.provider ?? "agent";
   const label = descriptor?.title?.trim() || descriptor?.description?.trim() || "Subagent";
   return {
     label,
@@ -161,6 +163,14 @@ function ProviderSubagentPanel() {
 
   return (
     <View style={styles.container} testID="provider-subagent-panel">
+      <OpenCodeStallNotice
+        provider={descriptor?.provider ?? parent?.provider}
+        status={descriptor ? providerSubagentLifecycleStatus(descriptor.status) : "initializing"}
+        lastActivityAt={descriptor?.updatedAt}
+        isWaitingForInput={isAgentWaitingForInput(parent)}
+        useParentRecoveryControls
+        testID="opencode-provider-subagent-stall-warning"
+      />
       <AgentStreamView
         agentId={streamId}
         serverId={serverId}

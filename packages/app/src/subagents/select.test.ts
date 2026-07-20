@@ -1,6 +1,10 @@
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { afterEach, describe, expect, it } from "vitest";
-import { selectProviderSubagentsForParent, selectSubagentsForParent } from "./select";
+import {
+  isAgentWaitingForInput,
+  selectProviderSubagentsForParent,
+  selectSubagentsForParent,
+} from "./select";
 import { useProviderSubagentStore } from "./provider-store";
 import { useSessionStore, type Agent } from "@/stores/session-store";
 
@@ -67,6 +71,28 @@ afterEach(() => {
 });
 
 describe("selectSubagentsForParent", () => {
+  it("uses the shared agent-state rules for input waits", () => {
+    expect(
+      isAgentWaitingForInput(makeAgent({ id: "permission", attentionReason: "permission" })),
+    ).toBe(true);
+    expect(
+      isAgentWaitingForInput(
+        makeAgent({
+          id: "pending",
+          pendingPermissions: [
+            {
+              id: "permission-1",
+              provider: "opencode",
+              name: "read",
+              kind: "tool",
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    expect(isAgentWaitingForInput(makeAgent({ id: "running", status: "running" }))).toBe(false);
+  });
+
   it("hides cached provider children when the host does not support them", () => {
     useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
       kind: "upsert",
@@ -239,6 +265,7 @@ describe("selectSubagentsForParent", () => {
         status: "running",
         requiresAttention: true,
         createdAt,
+        lastActivityAt: AGENT_TIMESTAMP,
         model: "should-not-leak",
         cwd: "/private/project",
       }),
@@ -262,12 +289,16 @@ describe("selectSubagentsForParent", () => {
         status: "running",
         requiresAttention: true,
         createdAt,
+        lastActivityAt: AGENT_TIMESTAMP,
+        isWaitingForInput: false,
       },
     ]);
     expect(Object.keys(rows[0] ?? {}).sort()).toEqual([
       "createdAt",
       "id",
+      "isWaitingForInput",
       "kind",
+      "lastActivityAt",
       "provider",
       "requiresAttention",
       "status",

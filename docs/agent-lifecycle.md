@@ -117,6 +117,8 @@ Clicking either kind opens a workspace tab. A Paseo subagent tab is a normal int
 
 Provider timelines use the same structural timeline item format but deliberately have a separate lifecycle and transport. A provider thread/session identifier is not a Paseo agent identifier, and closing its tab is always layout-only.
 
+OpenCode running agents and provider subagents get a passive “possibly stalled” presentation after ten minutes without translated activity. This is derived in the client from `lastActivityAt` or provider-subagent `updatedAt`; active child activity refreshes the parent's effective timestamp. Pending permission or question input suppresses the warning. The warning is presentation-only: it does not add a lifecycle state, persist attention, notify, interrupt, or attempt recovery.
+
 Archived Paseo subagents disappear from the track, by design. To remove one from the track without closing its tab, use the **archive button** on the row — it opens a confirm dialog and archives the subagent on confirm. Provider-owned rows have no individual Paseo lifecycle controls.
 
 The track header's **Archive finished** action hides finished provider-owned rows in the current app session. Their native sessions and timelines are untouched, and managed Paseo subagents are not archived by this bulk action. If a hidden provider child starts running again, the app brings it back to the track.

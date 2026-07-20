@@ -47,6 +47,11 @@ export function createPathEquivalenceMatcher(target: string): (candidate: string
   };
 }
 
+/** Build a stable lexical identity key using the same rules as path equivalence checks. */
+export function normalizePathForIdentity(value: string): string {
+  return normalizePathForComparison(value, looksLikeDefiniteWindowsPath(value));
+}
+
 export function createRealpathAwarePathMatcher(target: string): (candidate: string) => boolean {
   const targetMatchers = collectPathVariants(target).map((variant) =>
     createPathEquivalenceMatcher(variant),

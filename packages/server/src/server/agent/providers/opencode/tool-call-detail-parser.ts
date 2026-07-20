@@ -171,7 +171,9 @@ function formatLogEntry(value: unknown): string | undefined {
 function extractOpenCodeTaskSessionId(value: unknown): string | undefined {
   const text = readOutputText(value);
   if (text) {
-    const match = text.match(/\btask_id:\s*(ses_[A-Za-z0-9]+)/i);
+    const match =
+      text.match(/\btask_id:\s*(ses_[A-Za-z0-9]+)/i) ??
+      text.match(/<task\b[^>]*\bid=["'](ses_[A-Za-z0-9]+)["']/i);
     if (match?.[1]) {
       return match[1];
     }
@@ -196,6 +198,7 @@ function deriveOpencodeTaskDetail(
   input: unknown,
   output: unknown,
   error: unknown,
+  metadata?: Record<string, unknown>,
 ): ToolCallDetail | null {
   if (!isRecord(input)) {
     return null;
@@ -208,7 +211,8 @@ function deriveOpencodeTaskDetail(
   }
 
   const log = [formatLogEntry(output), formatLogEntry(error)].filter((entry) => entry).join("\n");
-  const childSessionId = extractOpenCodeTaskSessionId(output);
+  const childSessionId =
+    extractOpenCodeTaskSessionId(metadata) ?? extractOpenCodeTaskSessionId(output);
   return {
     type: "sub_agent",
     ...(subAgentType ? { subAgentType } : {}),
@@ -354,14 +358,16 @@ const OpencodeKnownToolDetailSchema = z.union([
   ),
 ]);
 
-export function deriveOpencodeToolDetail(
-  toolName: string,
-  input: unknown,
-  output: unknown,
-  error: unknown = null,
-): ToolCallDetail {
+export function deriveOpencodeToolDetail(params: {
+  toolName: string;
+  input: unknown;
+  output: unknown;
+  error?: unknown;
+  metadata?: Record<string, unknown>;
+}): ToolCallDetail {
+  const { toolName, input, output, error = null, metadata } = params;
   if (toolName.trim().toLowerCase() === "task") {
-    const taskDetail = deriveOpencodeTaskDetail(input, output, error);
+    const taskDetail = deriveOpencodeTaskDetail(input, output, error, metadata);
     if (taskDetail) {
       return taskDetail;
     }

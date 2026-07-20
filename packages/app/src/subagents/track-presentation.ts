@@ -2,6 +2,7 @@ import type { SidebarStateBucket } from "@/utils/sidebar-agent-state";
 import { deriveSidebarStateBucket } from "@/utils/sidebar-agent-state";
 import type { SubagentRow } from "./select";
 import { providerSubagentLifecycleStatus } from "./provider-store";
+import { deriveOpenCodeStallState } from "./opencode-stall";
 
 function presentationStatus(row: SubagentRow) {
   if (row.kind === "paseo") return row.status;
@@ -15,21 +16,34 @@ export interface SubagentRowPresentationData {
   subtitle: string;
   titleState: "ready" | "loading";
   statusBucket: SidebarStateBucket | null;
+  possiblyStalled: boolean;
+  inactiveMinutes: number | null;
 }
 
-export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowPresentationData {
+export function buildSubagentRowPresentationData(
+  row: SubagentRow,
+  nowMs = Date.now(),
+): SubagentRowPresentationData {
   const label = resolveRowLabel(row.title);
   const status = presentationStatus(row);
+  const stall = deriveOpenCodeStallState({
+    provider: row.provider,
+    status,
+    lastActivityAt: row.lastActivityAt,
+    isWaitingForInput: row.isWaitingForInput,
+    nowMs,
+  });
   return {
     key: `${row.kind}_subagent_${row.id}`,
     kind: "agent",
     label: label ?? "",
     subtitle: "",
     titleState: label ? "ready" : "loading",
-    statusBucket: deriveSidebarStateBucket({
-      status,
-      requiresAttention: false,
-    }),
+    statusBucket: stall.possiblyStalled
+      ? "needs_input"
+      : deriveSidebarStateBucket({ status, requiresAttention: false }),
+    possiblyStalled: stall.possiblyStalled,
+    inactiveMinutes: stall.inactiveMinutes,
   };
 }
 

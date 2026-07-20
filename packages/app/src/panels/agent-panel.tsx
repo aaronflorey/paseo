@@ -82,6 +82,8 @@ import {
   useSubagentsForParent,
 } from "@/subagents";
 import { SubagentsTrack } from "@/subagents/track";
+import { OpenCodeStallNotice } from "@/subagents/opencode-stall-notice";
+import { isAgentWaitingForInput, type SubagentRow } from "@/subagents/select";
 import type { PendingPermission } from "@/types/shared";
 import type { StreamItem } from "@/types/stream";
 import { getInitDeferred, getInitKey } from "@/utils/agent-initialization";
@@ -1138,6 +1140,10 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
     }),
     [text, setText, attachments, setAttachments, clear, isHydrated, composerState],
   );
+  const subagentRows = useSubagentsForParent({
+    serverId,
+    parentAgentId: agentId,
+  });
   const streamSection = (
     <RenderProfile id={`AgentStreamSection:${agentId}`}>
       <AgentStreamSection
@@ -1147,6 +1153,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         agent={effectiveAgent}
         routeBottomAnchorRequest={routeBottomAnchorRequest}
         hasAppliedAuthoritativeHistory={hasAppliedAuthoritativeHistory}
+        subagentRows={subagentRows}
         toast={toastApi}
         onOpenWorkspaceFile={onOpenWorkspaceFile}
       />
@@ -1163,6 +1170,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         cwd={cwd}
         isSubmitLoading={false}
         agentInputDraft={agentInputDraft}
+        subagentRows={subagentRows}
         onAttentionInputFocus={onAttentionInputFocus}
         onAttentionPromptSend={onAttentionPromptSend}
         onComposerHeightChange={handleComposerHeightChange}
@@ -1219,6 +1227,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   agent,
   routeBottomAnchorRequest,
   hasAppliedAuthoritativeHistory,
+  subagentRows,
   toast,
   onOpenWorkspaceFile,
 }: {
@@ -1228,6 +1237,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
   agent: AgentScreenAgent;
   routeBottomAnchorRequest: RouteBottomAnchorRequest;
   hasAppliedAuthoritativeHistory: boolean;
+  subagentRows: SubagentRow[];
   toast: ReturnType<typeof useToastHost>["api"];
   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
 }) {
@@ -1235,6 +1245,13 @@ const AgentStreamSection = memo(function AgentStreamSection({
     agentId ? state.sessions[serverId]?.agentStreamTail?.get(agentId) : undefined,
   );
   const streamItems = streamItemsRaw ?? EMPTY_STREAM_ITEMS;
+  const stallAgent = useSessionStore((state) =>
+    agentId ? state.sessions[serverId]?.agents.get(agentId) : undefined,
+  );
+  const childActivityAt = useMemo(
+    () => subagentRows.flatMap((row) => (row.status === "running" ? [row.lastActivityAt] : [])),
+    [subagentRows],
+  );
   const pendingPermissionList = useStoreWithEqualityFn(
     useSessionStore,
     (state) => {
@@ -1262,19 +1279,30 @@ const AgentStreamSection = memo(function AgentStreamSection({
     return new Map(pendingPermissionList.map((permission) => [permission.key, permission]));
   }, [pendingPermissionList]);
 
+  const isWaitingForInput = pendingPermissionList.length > 0 || isAgentWaitingForInput(stallAgent);
+
   return (
-    <AgentStreamView
-      ref={streamViewRef}
-      agentId={agent.id}
-      serverId={serverId}
-      context={agent}
-      streamItems={streamItems}
-      pendingPermissions={pendingPermissions}
-      routeBottomAnchorRequest={routeBottomAnchorRequest}
-      isAuthoritativeHistoryReady={hasAppliedAuthoritativeHistory}
-      toast={toast}
-      onOpenWorkspaceFile={onOpenWorkspaceFile}
-    />
+    <View style={styles.streamSection}>
+      <OpenCodeStallNotice
+        provider={stallAgent?.provider ?? agent.provider}
+        status={stallAgent?.status ?? agent.status}
+        lastActivityAt={stallAgent?.lastActivityAt}
+        childActivityAt={childActivityAt}
+        isWaitingForInput={isWaitingForInput}
+      />
+      <AgentStreamView
+        ref={streamViewRef}
+        agentId={agent.id}
+        serverId={serverId}
+        context={agent}
+        streamItems={streamItems}
+        pendingPermissions={pendingPermissions}
+        routeBottomAnchorRequest={routeBottomAnchorRequest}
+        isAuthoritativeHistoryReady={hasAppliedAuthoritativeHistory}
+        toast={toast}
+        onOpenWorkspaceFile={onOpenWorkspaceFile}
+      />
+    </View>
   );
 });
 
@@ -1287,6 +1315,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   cwd,
   isSubmitLoading,
   agentInputDraft,
+  subagentRows,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1300,6 +1329,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
   cwd: string;
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
+  subagentRows: SubagentRow[];
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1323,6 +1353,7 @@ const AgentComposerSection = memo(function AgentComposerSection({
       cwd={cwd}
       isSubmitLoading={isSubmitLoading}
       agentInputDraft={agentInputDraft}
+      subagentRows={subagentRows}
       onAttentionInputFocus={onAttentionInputFocus}
       onAttentionPromptSend={onAttentionPromptSend}
       onComposerHeightChange={onComposerHeightChange}
@@ -1338,6 +1369,7 @@ function ActiveAgentComposer({
   cwd,
   isSubmitLoading,
   agentInputDraft,
+  subagentRows,
   onAttentionInputFocus,
   onAttentionPromptSend,
   onComposerHeightChange,
@@ -1349,6 +1381,7 @@ function ActiveAgentComposer({
   cwd: string;
   isSubmitLoading: boolean;
   agentInputDraft: AgentInputDraft;
+  subagentRows: SubagentRow[];
   onAttentionInputFocus: () => void;
   onAttentionPromptSend: () => void;
   onComposerHeightChange: (height: number) => void;
@@ -1366,10 +1399,6 @@ function ActiveAgentComposer({
   const closeWorkspaceTab = useWorkspaceLayoutStore((state) => state.closeTab);
   const hideWorkspaceAgent = useWorkspaceLayoutStore((state) => state.hideAgent);
   const unpinWorkspaceAgent = useWorkspaceLayoutStore((state) => state.unpinAgent);
-  const subagentRows = useSubagentsForParent({
-    serverId,
-    parentAgentId: agentId,
-  });
   const canDetachSubagents = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.agentDetach === true,
   );
@@ -1593,6 +1622,10 @@ const foregroundColorMapping = (theme: Theme) => ({
 });
 
 const styles = StyleSheet.create((theme) => ({
+  streamSection: {
+    flex: 1,
+    minHeight: 0,
+  },
   root: {
     flex: 1,
     backgroundColor: theme.colors.surface0,

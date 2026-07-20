@@ -1469,6 +1469,10 @@ export const es: TranslationResources = {
     backdrop: "Fondo del menú",
   },
   subagents: {
+    possiblyStalled: "Posiblemente bloqueado",
+    stallWarning:
+      "Sin actividad durante {{count}} minutos; esta ejecución de OpenCode podría estar bloqueada",
+    stallParentRecovery: "Usa Detener o Recargar en la ejecución principal de OpenCode.",
     detachAction: "Separar {{label}}",
     detachTooltip: "Separar subagente",
     archiveAction: "Archivo{{label}}",

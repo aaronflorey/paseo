@@ -1426,6 +1426,9 @@ export const ar: TranslationResources = {
     backdrop: "خلفية القائمة",
   },
   subagents: {
+    possiblyStalled: "قد يكون متوقفًا",
+    stallWarning: "لا يوجد نشاط منذ {{count}} دقيقة — قد يكون تشغيل OpenCode هذا متوقفًا",
+    stallParentRecovery: "استخدم إيقاف أو إعادة التحميل في تشغيل OpenCode الأصلي.",
     detachAction: "فصل {{label}}",
     detachTooltip: "فصل الوكيل الفرعي",
     archiveAction: "أرشيف{{label}}",

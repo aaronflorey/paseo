@@ -226,6 +226,143 @@ describe("translateOpenCodeEvent", () => {
     ]);
   });
 
+  it("streams session.next reasoning and suppresses the final echo", () => {
+    const state = createState();
+    const started = translateOpenCodeEvent(
+      {
+        id: "next-reasoning-start",
+        type: "session.next.reasoning.started",
+        properties: {
+          timestamp: 1,
+          sessionID: "session-1",
+          reasoningID: "reasoning-next-1",
+        },
+      },
+      state,
+    );
+    const delta = translateOpenCodeEvent(
+      {
+        id: "next-reasoning-delta",
+        type: "session.next.reasoning.delta",
+        properties: {
+          timestamp: 2,
+          sessionID: "session-1",
+          reasoningID: "reasoning-next-1",
+          delta: "working it out",
+        },
+      },
+      state,
+    );
+    const ended = translateOpenCodeEvent(
+      {
+        id: "next-reasoning-end",
+        type: "session.next.reasoning.ended",
+        properties: {
+          timestamp: 3,
+          sessionID: "session-1",
+          reasoningID: "reasoning-next-1",
+          text: "working it out",
+        },
+      },
+      state,
+    );
+
+    expect([...started, ...delta, ...ended]).toEqual([
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: { type: "reasoning", text: "working it out" },
+      },
+    ]);
+  });
+
+  it("deduplicates mirrored OpenCode events by upstream id", () => {
+    const state = createState();
+    const event = {
+      id: "mirrored-delta-1",
+      type: "message.part.delta" as const,
+      properties: {
+        sessionID: "session-1",
+        messageID: "message-mirror",
+        partID: "part-mirror",
+        field: "text",
+        delta: "once",
+      },
+    };
+
+    expect([
+      ...translateOpenCodeEvent(event, state),
+      ...translateOpenCodeEvent({ ...event }, state),
+    ]).toEqual([
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: { type: "assistant_message", text: "once", messageId: "message-mirror" },
+      },
+    ]);
+  });
+
+  it("deduplicates mirrored text event families by stream identity and offset", () => {
+    const state = createState();
+    const nextDelta = translateOpenCodeEvent(
+      {
+        id: "next-text-delta-1",
+        type: "session.next.text.delta",
+        properties: {
+          timestamp: 1,
+          sessionID: "session-1",
+          assistantMessageID: "message-mirror-families",
+          textID: "part-mirror-families",
+          delta: "only once",
+        },
+      },
+      state,
+    );
+    const legacyMirror = translateOpenCodeEvent(
+      {
+        id: "legacy-text-delta-1",
+        type: "message.part.delta",
+        properties: {
+          sessionID: "session-1",
+          messageID: "message-mirror-families",
+          partID: "part-mirror-families",
+          field: "text",
+          delta: "only once",
+        },
+      },
+      state,
+    );
+
+    expect([...nextDelta, ...legacyMirror]).toEqual([
+      {
+        type: "timeline",
+        provider: "opencode",
+        item: {
+          type: "assistant_message",
+          text: "only once",
+          messageId: "message-mirror-families",
+        },
+      },
+    ]);
+  });
+
+  it("bounds processed upstream event identities per session", () => {
+    const state = createState();
+    for (let index = 0; index < 4_097; index += 1) {
+      translateOpenCodeEvent(
+        {
+          id: `status-${index}`,
+          type: "session.status",
+          properties: { sessionID: "session-1", status: { type: "busy" } },
+        },
+        state,
+      );
+    }
+
+    expect(state.processedEventIds?.size).toBe(4_096);
+    expect(state.processedEventIds?.has("status-0")).toBe(false);
+  });
+
   it("emits assistant text from message.part.delta events", () => {
     const state = createState();
 

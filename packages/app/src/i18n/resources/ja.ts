@@ -1444,6 +1444,10 @@ export const ja: TranslationResources = {
     backdrop: "メニューの背景",
   },
   subagents: {
+    possiblyStalled: "停止している可能性",
+    stallWarning:
+      "{{count}}分間アクティビティがありません。このOpenCode実行は停止している可能性があります",
+    stallParentRecovery: "親のOpenCode実行で［停止］または［再読み込み］を使用してください。",
     detachAction: "{{label}}を切り離す",
     detachTooltip: "サブエージェントを切り離す",
     archiveAction: "{{label}}をアーカイブ",

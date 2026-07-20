@@ -481,6 +481,41 @@ describe("opencode tool-call mapper", () => {
     });
   });
 
+  it("prefers the current task metadata session id", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-metadata-id",
+        status: "running",
+        input: { subagent_type: "explore", description: "Inspect events" },
+        output: null,
+        metadata: { sessionId: "ses_current_metadata" },
+      }),
+    );
+
+    expect(item.detail).toMatchObject({
+      type: "sub_agent",
+      childSessionId: "ses_current_metadata",
+    });
+  });
+
+  it("extracts the current task XML envelope id", () => {
+    const item = expectMapped(
+      mapOpencodeToolCall({
+        toolName: "task",
+        callId: "opencode-task-xml-id",
+        status: "completed",
+        input: { subagent_type: "explore", description: "Inspect events" },
+        output: '<task id="ses_currentxml" state="completed">done</task>',
+      }),
+    );
+
+    expect(item.detail).toMatchObject({
+      type: "sub_agent",
+      childSessionId: "ses_currentxml",
+    });
+  });
+
   it("maps aborted task calls with preserved error log to sub_agent detail", () => {
     const item = expectMapped(
       mapOpencodeToolCall({

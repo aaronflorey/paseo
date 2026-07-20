@@ -18,6 +18,8 @@ function row(
     status: overrides.status ?? "idle",
     requiresAttention: overrides.requiresAttention ?? false,
     createdAt: overrides.createdAt ?? new Date("2026-04-20T00:00:00.000Z"),
+    lastActivityAt: overrides.lastActivityAt ?? new Date("2026-04-20T00:00:00.000Z"),
+    isWaitingForInput: overrides.isWaitingForInput ?? false,
   };
 }
 
@@ -85,6 +87,8 @@ describe("countFinishedSubagents", () => {
         status: "running",
         requiresAttention: false,
         createdAt: new Date("2026-04-20T00:00:00.000Z"),
+        lastActivityAt: new Date("2026-04-20T00:00:00.000Z"),
+        isWaitingForInput: false,
       },
       {
         kind: "provider",
@@ -95,6 +99,8 @@ describe("countFinishedSubagents", () => {
         status: "failed",
         requiresAttention: true,
         createdAt: new Date("2026-04-20T00:00:01.000Z"),
+        lastActivityAt: new Date("2026-04-20T00:00:01.000Z"),
+        isWaitingForInput: false,
       },
     ];
 
@@ -164,5 +170,34 @@ describe("buildSubagentRowPresentationData", () => {
       buildSubagentRowPresentationData(row({ id: "a", status: "idle", requiresAttention: true }))
         .statusBucket,
     ).toBe("done");
+  });
+
+  it("maps a possibly stalled OpenCode row to the amber input bucket", () => {
+    const nowMs = new Date("2026-04-20T00:10:00.000Z").getTime();
+    expect(
+      buildSubagentRowPresentationData(
+        row({ id: "a", provider: "opencode", status: "running" }),
+        nowMs,
+      ),
+    ).toMatchObject({
+      statusBucket: "needs_input",
+      possiblyStalled: true,
+      inactiveMinutes: 10,
+    });
+  });
+
+  it("keeps a waiting OpenCode row running without a stall warning", () => {
+    const nowMs = new Date("2026-04-20T00:10:00.000Z").getTime();
+    expect(
+      buildSubagentRowPresentationData(
+        row({
+          id: "a",
+          provider: "opencode",
+          status: "running",
+          isWaitingForInput: true,
+        }),
+        nowMs,
+      ),
+    ).toMatchObject({ statusBucket: "running", possiblyStalled: false });
   });
 });

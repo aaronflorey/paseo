@@ -1,14 +1,15 @@
 # OpenCode Global Event Verification
 
-Date: 2026-05-11
+Date: 2026-07-19
 
 ## Objective
 
-Replace the OpenCode provider's per-directory `/event` stream with OpenCode's `/global/event` stream and remove the EOF polling recovery path that was added for the `/event` regression.
+Record the verified `/global/event` compatibility boundary used by Paseo's OpenCode provider.
 
 ## Environment
 
-- `opencode --version`: `1.14.46`
+- `opencode --version`: `1.18.3`
+- `@opencode-ai/sdk`: `1.18.3` (exact pin)
 - `which opencode`: `opencode`
 - `node --version`: `v22.20.0`
 - `npm --version`: `10.9.3`
@@ -18,6 +19,12 @@ Each OpenCode test file was run independently with:
 ```bash
 /opt/homebrew/bin/timeout 420s npx vitest run <file> --maxWorkers=1
 ```
+
+## 1.18.3 wire shapes
+
+The global stream can deliver legacy event objects, flat sync records (`{ type: "sync", name, id, data }`), or nested sync envelopes (`payload.syncEvent`). OpenCode 1.18.3 also emits `session.next.*` text, reasoning, retry, and tool events, and may place a streaming delta directly on `message.part.updated.properties.delta`. Paseo normalizes these at one boundary before directory filtering or session routing. The normalized event retains the upstream directory, event ID, session/part/tool identity, and supports the legacy shapes for older OpenCode binaries.
+
+OpenCode can mirror the same logical update through more than one event family. The adapter streams deltas immediately, emits only residual final content, and bounds its upstream-event identity registry to 4,096 entries per session. Unknown same-directory sessions are held briefly because child output can precede the event that establishes the parent relationship; cross-directory events are rejected before that routing step.
 
 ## Baseline
 

@@ -3196,6 +3196,7 @@ test("session config drift events update state through the stream channel", asyn
     undefined,
     { workspaceId: undefined },
   );
+  const initialUpdatedAt = snapshot.updatedAt;
   const streams: AgentStreamEvent[] = [];
   manager.subscribe(
     (event) => {
@@ -3235,6 +3236,8 @@ test("session config drift events update state through the stream channel", asyn
 
   const agent = manager.getAgent(snapshot.id);
   expect(agent?.currentModeId).toBe("build");
+  expect(agent?.config.modeId).toBe("build");
+  expect(agent?.updatedAt.getTime()).toBeGreaterThan(initialUpdatedAt.getTime());
   expect(agent?.availableModes).toEqual([
     { id: "plan", label: "Plan" },
     { id: "build", label: "Build" },

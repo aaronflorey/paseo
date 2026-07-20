@@ -1461,6 +1461,10 @@ export const ru: TranslationResources = {
     backdrop: "Фон меню",
   },
   subagents: {
+    possiblyStalled: "Возможно, завис",
+    stallWarning: "Нет активности {{count}} минут — возможно, этот запуск OpenCode завис",
+    stallParentRecovery:
+      "Используйте «Остановить» или «Перезагрузить» в родительском запуске OpenCode.",
     detachAction: "Отсоединить {{label}}",
     detachTooltip: "Отсоединить субагент",
     archiveAction: "Архив{{label}}",

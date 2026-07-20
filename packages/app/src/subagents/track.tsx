@@ -7,10 +7,7 @@ import { getProviderIcon } from "@/components/provider-icons";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsCompactFormFactor, MAX_CONTENT_WIDTH } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
-import {
-  WorkspaceTabIcon,
-  type WorkspaceTabPresentation,
-} from "@/screens/workspace/workspace-tab-presentation";
+import { WorkspaceTabIcon } from "@/screens/workspace/workspace-tab-presentation";
 import type { Theme } from "@/styles/theme";
 import type { SubagentRow } from "./select";
 import {
@@ -18,6 +15,7 @@ import {
   countFinishedSubagents,
   formatHeaderLabel,
 } from "./track-presentation";
+import { useOpenCodeStallClock } from "./opencode-stall";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedChevronDown = withUnistyles(ChevronDown);
@@ -40,13 +38,6 @@ export interface SubagentsTrackProps {
 
 const SUBAGENTS_LIST_MAX_HEIGHT = 200;
 
-function buildRowPresentation(row: SubagentRow): WorkspaceTabPresentation {
-  return {
-    ...buildSubagentRowPresentationData(row),
-    icon: getProviderIcon(row.provider),
-  };
-}
-
 export function SubagentsTrack({
   rows,
   onOpenSubagent,
@@ -57,6 +48,10 @@ export function SubagentsTrack({
 }: SubagentsTrackProps): ReactElement | null {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const hasRunningOpenCodeRow = rows.some(
+    (row) => row.provider === "opencode" && row.status === "running",
+  );
+  const nowMs = useOpenCodeStallClock(expanded && hasRunningOpenCodeRow);
 
   const toggleExpanded = useCallback(() => {
     setExpanded((current) => !current);
@@ -131,6 +126,7 @@ export function SubagentsTrack({
                 <SubagentsTrackRow
                   key={row.id}
                   row={row}
+                  nowMs={nowMs}
                   onOpenSubagent={onOpenSubagent}
                   onOpenProviderSubagent={onOpenProviderSubagent}
                   onArchiveSubagent={onArchiveSubagent}
@@ -147,6 +143,7 @@ export function SubagentsTrack({
 
 interface SubagentsTrackRowProps {
   row: SubagentRow;
+  nowMs: number;
   onOpenSubagent: (id: string) => void;
   onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
@@ -155,6 +152,7 @@ interface SubagentsTrackRowProps {
 
 function SubagentsTrackRow({
   row,
+  nowMs,
   onOpenSubagent,
   onOpenProviderSubagent,
   onArchiveSubagent,
@@ -163,7 +161,14 @@ function SubagentsTrackRow({
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
   const [hovered, setHovered] = useState(false);
-  const presentation = useMemo(() => buildRowPresentation(row), [row]);
+  const presentationData = useMemo(
+    () => buildSubagentRowPresentationData(row, nowMs),
+    [nowMs, row],
+  );
+  const presentation = useMemo(
+    () => ({ ...presentationData, icon: getProviderIcon(row.provider) }),
+    [presentationData, row.provider],
+  );
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
   const handlePress = useCallback(() => {
@@ -201,6 +206,11 @@ function SubagentsTrackRow({
             <Text style={styles.rowLabel} numberOfLines={1}>
               {displayLabel}
             </Text>
+            {presentationData.possiblyStalled ? (
+              <Text style={styles.stallLabel} numberOfLines={1}>
+                {t("subagents.possiblyStalled")}
+              </Text>
+            ) : null}
             {row.kind === "paseo" ? (
               <SubagentRowActions
                 rowId={row.id}
@@ -387,6 +397,11 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     fontSize: theme.fontSize.sm,
     color: theme.colors.foreground,
+  },
+  stallLabel: {
+    flexShrink: 0,
+    fontSize: theme.fontSize.xs,
+    color: theme.colors.statusWarning,
   },
   actionClusterVisible: {
     flexDirection: "row",
