@@ -26,7 +26,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [015](015-stabilize-interrupt-follow-up-e2e.md)   | Stabilize interrupt-to-follow-up E2E tracking      | P2       | M      | —                            | REJECTED: skipped by operator |
 | [016](016-execute-generated-plugin-contracts.md)  | Execute generated OpenCode plugins in tests        | P2       | M      | —                            | DONE                          |
 | [017](017-honor-hook-cli-override.md)             | Honor `PASEO_HOOK_CLI` in the OpenCode hook        | P2       | S      | 016                          | DONE                          |
-| [018](018-design-opencode-health-diagnostics.md)  | Design redacted OpenCode health diagnostics        | P3       | M      | 001, 004, 006, 007, 009, 010 | TODO                          |
+| [018](018-design-opencode-health-diagnostics.md)  | Design redacted OpenCode health diagnostics        | P3       | M      | 001, 004, 006, 007, 009, 010 | DONE                          |
 | [019](019-correct-process-isolation-copy.md)      | Correct public process-isolation copy              | P3       | S      | —                            | TODO                          |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED: <reason>`, or
@@ -48,5 +48,5 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED: <reason>`, or
 
 ## Findings considered and rejected
 
-None. The operator selected all 17 actionable findings and both lower-priority
-opportunities from the audit.
+The operator later rejected plan 015. All other actionable findings and both
+lower-priority opportunities from the audit remain selected.
