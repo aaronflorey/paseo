@@ -16,6 +16,7 @@ import type {
 } from "../../managed-processes/managed-processes.js";
 import type { ProcessTerminator, TreeKillTarget } from "../../../utils/tree-kill.js";
 import {
+  __openCodeServerManagerInternals,
   OpenCodeServerManager,
   type OpenCodeCommandPrefixResolver,
   type OpenCodePortAllocator,
@@ -348,9 +349,66 @@ describe.runIf(process.platform === "win32")(
 );
 
 describe("OpenCodeServerManager runtime settings", () => {
-  test("logs only differing setting categories when the singleton settings conflict", async () => {
+  test.each<{
+    name: string;
+    existing: ProviderRuntimeSettings | undefined;
+    requested: ProviderRuntimeSettings | undefined;
+    expected: string[];
+  }>([
+    {
+      name: "missing and explicitly empty settings",
+      existing: undefined,
+      requested: {
+        command: { mode: "default" },
+        env: {},
+        disallowedTools: ["client-only-tool"],
+      },
+      expected: [],
+    },
+    {
+      name: "reordered environment keys",
+      existing: { env: { FIRST: "one", SECOND: "two" } },
+      requested: { env: { SECOND: "two", FIRST: "one" } },
+      expected: [],
+    },
+    {
+      name: "changed environment value",
+      existing: { env: { TOKEN: "first" } },
+      requested: { env: { TOKEN: "second" } },
+      expected: ["env"],
+    },
+    {
+      name: "changed command",
+      existing: { command: { mode: "replace", argv: ["opencode-a", "serve"] } },
+      requested: { command: { mode: "replace", argv: ["opencode-b", "serve"] } },
+      expected: ["command"],
+    },
+    {
+      name: "changed command arguments",
+      existing: { command: { mode: "replace", argv: ["opencode", "--first"] } },
+      requested: { command: { mode: "replace", argv: ["opencode", "--second"] } },
+      expected: ["args"],
+    },
+    {
+      name: "changed inline config",
+      existing: { env: { OPENCODE_CONFIG_CONTENT: '{"theme":"dark"}' } },
+      requested: { env: { OPENCODE_CONFIG_CONTENT: '{"theme":"light"}' } },
+      expected: ["configContent"],
+    },
+  ])("canonicalizes $name", ({ existing, requested, expected }) => {
+    expect(
+      __openCodeServerManagerInternals.getOpenCodeHelperRuntimeSettingDifferences(
+        existing,
+        requested,
+      ),
+    ).toEqual(expected);
+  });
+
+  test("rejects conflicting singleton settings without exposing their values", async () => {
     const logger = createTestLogger();
     const warn = vi.spyOn(logger, "warn");
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "opencode-conflicting-settings-"));
+    const runtime = new FakeOpenCodeServerRuntime([4701], { autoAnnounce: true });
     const existingCanaries = {
       command: "existing-command-canary",
       arg: "existing-arg-canary",
@@ -387,28 +445,58 @@ describe("OpenCodeServerManager runtime settings", () => {
       },
       disallowedTools: [requestedCanaries.tool],
     };
-    const manager = OpenCodeServerManager.getInstance(logger, existingRuntimeSettings);
+    const manager = OpenCodeServerManager.getInstance(logger, existingRuntimeSettings, {
+      managedProcesses: runtime.managedProcesses,
+      portAllocator: runtime.allocatePort,
+      resolveCommandPrefix: runtime.resolveCommandPrefix,
+      resolveHomeDir: () => tempDir,
+      spawnServerProcess: runtime.spawnServerProcess,
+      terminateProcess: runtime.terminateProcess,
+    });
 
     try {
       expect(OpenCodeServerManager.getInstance(logger, existingRuntimeSettings)).toBe(manager);
       expect(warn).not.toHaveBeenCalled();
 
-      expect(OpenCodeServerManager.getInstance(logger, requestedRuntimeSettings)).toBe(manager);
+      let conflictError: unknown;
+      try {
+        OpenCodeServerManager.getInstance(logger, requestedRuntimeSettings);
+      } catch (error) {
+        conflictError = error;
+      }
 
+      expect(conflictError).toBeInstanceOf(Error);
+      if (!(conflictError instanceof Error)) {
+        throw new Error("Expected conflicting OpenCode runtime settings to throw");
+      }
+      expect(conflictError.message).toBe(
+        "OpenCode uses one shared helper; conflicting profile runtime settings cannot coexist (different categories: command, args, env, configContent)",
+      );
       expect(warn).toHaveBeenCalledOnce();
       expect(warn).toHaveBeenCalledWith(
-        { differingRuntimeSettingCategories: ["command", "env", "disallowedTools"] },
+        {
+          differingRuntimeSettingCategories: ["command", "args", "env", "configContent"],
+        },
         "OpenCode server manager already initialized with different runtime settings",
       );
-      const capturedWarning = JSON.stringify(warn.mock.calls);
+      const capturedDiagnostic = JSON.stringify({
+        error: conflictError instanceof Error ? conflictError.message : conflictError,
+        warning: warn.mock.calls,
+      });
       for (const canary of [
         ...Object.values(existingCanaries),
         ...Object.values(requestedCanaries),
       ]) {
-        expect(capturedWarning).not.toContain(canary);
+        expect(capturedDiagnostic).not.toContain(canary);
       }
+
+      expect(OpenCodeServerManager.getInstance(logger, existingRuntimeSettings)).toBe(manager);
+      const acquisition = await manager.acquireCurrent();
+      expect(acquisition.server.url).toBe("http://127.0.0.1:4701");
+      await acquisition.release();
     } finally {
       await manager.shutdown();
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

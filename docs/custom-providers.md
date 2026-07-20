@@ -274,6 +274,12 @@ Example: two different Anthropic accounts as separate profiles:
 
 Each profile appears as a separate provider in the Paseo app. You can select which one to use when launching an agent.
 
+### OpenCode shared helper constraint
+
+All OpenCode clients in one Paseo daemon share a single local helper process. The built-in OpenCode provider and every profile that extends `opencode` must therefore use the same helper-global command, command arguments, environment, and inline `OPENCODE_CONFIG_CONTENT`. Paseo rejects a profile whose helper settings differ instead of silently running it with another profile's binary or credentials.
+
+Use one shared helper configuration for all OpenCode profiles. If profiles require isolated binaries, credentials, or inline configuration, run them under separate Paseo daemons with separate `PASEO_HOME` directories.
+
 You can also combine profiles with model overrides to pin specific models per profile:
 
 ```json

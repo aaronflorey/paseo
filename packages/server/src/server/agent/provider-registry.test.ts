@@ -1447,6 +1447,53 @@ describe("model merging", () => {
   });
 });
 
+test("materializes OpenCode profiles with identical helper settings", () => {
+  const registry = buildProviderRegistry(logger, {
+    providerOverrides: {
+      "opencode-work": {
+        extends: "opencode",
+        label: "OpenCode Work",
+        disallowedTools: ["work-only-tool"],
+      },
+      "opencode-personal": {
+        extends: "opencode",
+        label: "OpenCode Personal",
+        disallowedTools: ["personal-only-tool"],
+      },
+    },
+  });
+
+  expect(registry["opencode-work"].createClient(logger).provider).toBe("opencode-work");
+  expect(registry["opencode-personal"].createClient(logger).provider).toBe("opencode-personal");
+});
+
+test("rejects an OpenCode profile with conflicting helper settings during materialization", () => {
+  const canary = "conflicting-opencode-profile-secret";
+  let conflictError: unknown;
+
+  try {
+    buildProviderRegistry(logger, {
+      providerOverrides: {
+        "opencode-conflict": {
+          extends: "opencode",
+          label: "OpenCode Conflict",
+          env: { OPENCODE_API_KEY: canary },
+        },
+      },
+    });
+  } catch (error) {
+    conflictError = error;
+  }
+
+  expect(conflictError).toBeInstanceOf(Error);
+  if (!(conflictError instanceof Error)) {
+    throw new Error("Expected conflicting OpenCode profile settings to throw");
+  }
+  expect(conflictError.message).toContain("OpenCode uses one shared helper");
+  expect(conflictError.message).toContain("different categories: env");
+  expect(conflictError.message).not.toContain(canary);
+});
+
 describe("fetchCatalog", () => {
   test("returns merged models and modes from fetchCatalog", async () => {
     mockState.runtimeModels.set("codex", [

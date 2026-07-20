@@ -18,11 +18,95 @@ import { resolveOpenCodeHomeDir } from "./paths.js";
 
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
-const OPENCODE_RUNTIME_SETTING_CATEGORIES = [
-  "command",
-  "env",
-  "disallowedTools",
-] as const satisfies ReadonlyArray<keyof ProviderRuntimeSettings>;
+const OPENCODE_CONFIG_CONTENT_ENV_KEY = "OPENCODE_CONFIG_CONTENT";
+
+type OpenCodeHelperRuntimeSettingCategory = "command" | "args" | "env" | "configContent";
+
+interface CanonicalOpenCodeHelperRuntimeSettings {
+  command: string | null;
+  args: string[];
+  env: Array<[string, string]>;
+  configContent: string | null;
+}
+
+function canonicalizeOpenCodeHelperRuntimeSettings(
+  runtimeSettings: ProviderRuntimeSettings | undefined,
+): CanonicalOpenCodeHelperRuntimeSettings {
+  const commandConfig = runtimeSettings?.command;
+  const command = commandConfig?.mode === "replace" ? commandConfig.argv[0] : null;
+  let args: string[] = [];
+  if (commandConfig?.mode === "replace") {
+    args = commandConfig.argv.slice(1);
+  } else if (commandConfig?.mode === "append") {
+    args = [...(commandConfig.args ?? [])];
+  }
+
+  const runtimeEnv = runtimeSettings?.env ?? {};
+  const env = Object.entries(runtimeEnv).filter(([key]) => key !== OPENCODE_CONFIG_CONTENT_ENV_KEY);
+  env.sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey));
+
+  return {
+    command,
+    args,
+    env,
+    configContent: runtimeEnv[OPENCODE_CONFIG_CONTENT_ENV_KEY] ?? null,
+  };
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function envEntriesEqual(left: Array<[string, string]>, right: Array<[string, string]>): boolean {
+  return (
+    left.length === right.length &&
+    left.every(([key, value], index) => key === right[index]?.[0] && value === right[index]?.[1])
+  );
+}
+
+function getCanonicalRuntimeSettingDifferences(
+  existing: CanonicalOpenCodeHelperRuntimeSettings,
+  requested: CanonicalOpenCodeHelperRuntimeSettings,
+): OpenCodeHelperRuntimeSettingCategory[] {
+  const differences: OpenCodeHelperRuntimeSettingCategory[] = [];
+  if (existing.command !== requested.command) {
+    differences.push("command");
+  }
+  if (!stringArraysEqual(existing.args, requested.args)) {
+    differences.push("args");
+  }
+  if (!envEntriesEqual(existing.env, requested.env)) {
+    differences.push("env");
+  }
+  if (existing.configContent !== requested.configContent) {
+    differences.push("configContent");
+  }
+  return differences;
+}
+
+function getOpenCodeHelperRuntimeSettingDifferences(
+  existing: ProviderRuntimeSettings | undefined,
+  requested: ProviderRuntimeSettings | undefined,
+): OpenCodeHelperRuntimeSettingCategory[] {
+  return getCanonicalRuntimeSettingDifferences(
+    canonicalizeOpenCodeHelperRuntimeSettings(existing),
+    canonicalizeOpenCodeHelperRuntimeSettings(requested),
+  );
+}
+
+class OpenCodeHelperRuntimeSettingsConflictError extends Error {
+  readonly differingRuntimeSettingCategories: OpenCodeHelperRuntimeSettingCategory[];
+
+  constructor(differingRuntimeSettingCategories: OpenCodeHelperRuntimeSettingCategory[]) {
+    super(
+      `OpenCode uses one shared helper; conflicting profile runtime settings cannot coexist (different categories: ${differingRuntimeSettingCategories.join(", ")})`,
+    );
+    this.name = "OpenCodeHelperRuntimeSettingsConflictError";
+    this.differingRuntimeSettingCategories = differingRuntimeSettingCategories;
+  }
+}
+
+export const __openCodeServerManagerInternals = { getOpenCodeHelperRuntimeSettingDifferences };
 
 export interface OpenCodeServerAcquisition {
   server: { port: number; url: string; generation: object };
@@ -76,7 +160,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private shuttingDown = false;
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
-  private readonly runtimeSettingsKey: string;
+  private readonly helperRuntimeSettings: CanonicalOpenCodeHelperRuntimeSettings;
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly terminateProcess: ProcessTerminator;
   private readonly portAllocator: OpenCodePortAllocator;
@@ -88,7 +172,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   constructor(options: OpenCodeServerManagerOptions) {
     this.logger = options.logger;
     this.runtimeSettings = options.runtimeSettings;
-    this.runtimeSettingsKey = JSON.stringify(this.runtimeSettings ?? {});
+    this.helperRuntimeSettings = canonicalizeOpenCodeHelperRuntimeSettings(this.runtimeSettings);
     this.managedProcesses = options.managedProcesses;
     this.terminateProcess = options.terminateProcess ?? terminateWithTreeKill;
     this.portAllocator = options.portAllocator ?? findAvailablePort;
@@ -105,7 +189,6 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     runtimeSettings?: ProviderRuntimeSettings,
     options: Omit<OpenCodeServerManagerOptions, "logger" | "runtimeSettings"> = {},
   ): OpenCodeServerManager {
-    const nextSettingsKey = JSON.stringify(runtimeSettings ?? {});
     if (!OpenCodeServerManager.instance) {
       OpenCodeServerManager.instance = new OpenCodeServerManager({
         logger,
@@ -113,17 +196,18 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         ...options,
       });
       OpenCodeServerManager.registerExitHandler();
-    } else if (OpenCodeServerManager.instance.runtimeSettingsKey !== nextSettingsKey) {
-      const existingRuntimeSettings = OpenCodeServerManager.instance.runtimeSettings;
-      const differingRuntimeSettingCategories = OPENCODE_RUNTIME_SETTING_CATEGORIES.filter(
-        (category) =>
-          JSON.stringify(existingRuntimeSettings?.[category]) !==
-          JSON.stringify(runtimeSettings?.[category]),
+    } else {
+      const differingRuntimeSettingCategories = getCanonicalRuntimeSettingDifferences(
+        OpenCodeServerManager.instance.helperRuntimeSettings,
+        canonicalizeOpenCodeHelperRuntimeSettings(runtimeSettings),
       );
-      logger.warn(
-        { differingRuntimeSettingCategories },
-        "OpenCode server manager already initialized with different runtime settings",
-      );
+      if (differingRuntimeSettingCategories.length > 0) {
+        logger.warn(
+          { differingRuntimeSettingCategories },
+          "OpenCode server manager already initialized with different runtime settings",
+        );
+        throw new OpenCodeHelperRuntimeSettingsConflictError(differingRuntimeSettingCategories);
+      }
     }
     return OpenCodeServerManager.instance;
   }
