@@ -23,6 +23,7 @@ import {
   type OpenCodeServerProcessSpawner,
 } from "./opencode/server-manager.js";
 import type { ProviderRuntimeSettings } from "../provider-launch-config.js";
+import { TestOpenCodeClient } from "./opencode/test-utils/test-opencode-harness.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -159,6 +160,43 @@ describe("OpenCodeServerManager generations", () => {
     await expect(replacement).rejects.toThrow("OpenCode server exited with code null");
     expect(runtime.terminatedPorts).toEqual([4473, 4474]);
     expect(await runtime.managedProcesses.list()).toEqual([]);
+  });
+
+  test("shutdown clears manager-owned project leases after helper termination begins", async () => {
+    const { manager, runtime } = createTestManager([4477]);
+    const acquisition = await manager.acquireCurrent();
+    const firstSdk = new TestOpenCodeClient();
+    const firstLease = await manager.projectInstanceLeases.acquire({
+      serverGeneration: acquisition.server.generation,
+      directory: "/workspace/shared",
+      client: firstSdk.asSdkClient(),
+    });
+    const clearProjectLeases = manager.projectInstanceLeases.clear.bind(
+      manager.projectInstanceLeases,
+    );
+    vi.spyOn(manager.projectInstanceLeases, "clear").mockImplementation(() => {
+      runtime.lifecycleEvents.push("clear-project-leases");
+      clearProjectLeases();
+    });
+
+    await manager.shutdown();
+
+    expect(runtime.lifecycleEvents).toEqual(["terminate-helper", "clear-project-leases"]);
+
+    const { manager: nextManager } = createTestManager([4478]);
+    const secondSdk = new TestOpenCodeClient();
+    const secondLease = await nextManager.projectInstanceLeases.acquire({
+      serverGeneration: acquisition.server.generation,
+      directory: "/workspace/shared",
+      client: secondSdk.asSdkClient(),
+    });
+
+    await firstLease.release();
+    expect(firstSdk.calls.instanceDispose).toEqual([{ directory: "/workspace/shared" }]);
+    expect(secondSdk.calls.instanceDispose).toEqual([]);
+    await secondLease.release();
+    expect(secondSdk.calls.instanceDispose).toEqual([{ directory: "/workspace/shared" }]);
+    await nextManager.shutdown();
   });
 
   test("acquireExisting returns another reference to the shared server", async () => {
@@ -535,6 +573,7 @@ function createTestManager(
 
 class FakeOpenCodeServerRuntime {
   readonly managedProcesses = new FakeManagedProcesses();
+  readonly lifecycleEvents: string[] = [];
   readonly terminatedPorts: number[] = [];
   readonly spawnCalls: Array<{
     command: string;
@@ -582,6 +621,7 @@ class FakeOpenCodeServerRuntime {
 
   readonly terminateProcess: ProcessTerminator = async (target: TreeKillTarget) => {
     const process = this.processForChild(target as ChildProcess);
+    this.lifecycleEvents.push("terminate-helper");
     this.terminatedPorts.push(process.port);
     process.exitBySignal("SIGTERM");
     return "terminated";

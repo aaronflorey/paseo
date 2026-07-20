@@ -78,7 +78,6 @@ import {
   type OpenCodeServerManagerLike,
 } from "./opencode/server-manager.js";
 import { resolveOpenCodeHomeDir } from "./opencode/paths.js";
-import { OpenCodeProjectInstanceLeaseCoordinator } from "./opencode/project-instance-leases.js";
 import { resolveOpenCodeSharedServerEnv } from "./opencode/session-routing-plugin.js";
 import {
   openCodeSessionContextBridge,
@@ -1336,7 +1335,6 @@ export class OpenCodeAgentClient implements AgentClient {
   private readonly serverManager: OpenCodeServerManagerLike;
   private readonly createOpenCodeClient: OpenCodeClientFactory;
   private readonly resolveHomeDir: () => string;
-  private readonly projectInstanceLeases: OpenCodeProjectInstanceLeaseCoordinator;
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
   private readonly modelContextWindows = new Map<string, number>();
@@ -1347,12 +1345,6 @@ export class OpenCodeAgentClient implements AgentClient {
     deps: OpenCodeAgentClientDeps = {},
   ) {
     this.logger = logger.child({ module: "agent", provider: "opencode" });
-    this.projectInstanceLeases = new OpenCodeProjectInstanceLeaseCoordinator((error, directory) => {
-      this.logger.warn(
-        { err: error, directory },
-        "OpenCode project instance disposal failed; the next acquisition will retry",
-      );
-    });
     this.runtimeSettings = runtimeSettings;
     this.serverManager =
       deps.serverManager ??
@@ -1383,7 +1375,7 @@ export class OpenCodeAgentClient implements AgentClient {
       baseUrl: acquisition.server.url,
       directory,
     });
-    const projectLease = await this.projectInstanceLeases
+    const projectLease = await this.serverManager.projectInstanceLeases
       .acquire({
         serverGeneration: acquisition.server.generation,
         directory,
@@ -1670,7 +1662,6 @@ export class OpenCodeAgentClient implements AgentClient {
 
   async shutdown(): Promise<void> {
     await this.serverManager.shutdown();
-    this.projectInstanceLeases.clear();
     openCodeProjectMcpConfigs.clear();
     openCodeSessionContextRegistry.clear();
     await openCodeSessionContextBridge.close();

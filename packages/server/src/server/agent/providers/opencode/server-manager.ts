@@ -15,6 +15,7 @@ import {
   type ProviderRuntimeSettings,
 } from "../../provider-launch-config.js";
 import { resolveOpenCodeHomeDir } from "./paths.js";
+import { OpenCodeProjectInstanceLeaseCoordinator } from "./project-instance-leases.js";
 
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
@@ -114,6 +115,7 @@ export interface OpenCodeServerAcquisition {
 }
 
 export interface OpenCodeServerManagerLike {
+  readonly projectInstanceLeases: OpenCodeProjectInstanceLeaseCoordinator;
   acquireCurrent(): Promise<OpenCodeServerAcquisition>;
   acquireNew(): Promise<OpenCodeServerAcquisition>;
   acquireExisting(url: string): OpenCodeServerAcquisition | null;
@@ -151,6 +153,7 @@ export interface OpenCodeServerManagerOptions {
 }
 
 export class OpenCodeServerManager implements OpenCodeServerManagerLike {
+  readonly projectInstanceLeases: OpenCodeProjectInstanceLeaseCoordinator;
   private static instance: OpenCodeServerManager | null = null;
   private static exitHandlerRegistered = false;
   private currentServer: OpenCodeServerGeneration | null = null;
@@ -171,6 +174,12 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
 
   constructor(options: OpenCodeServerManagerOptions) {
     this.logger = options.logger;
+    this.projectInstanceLeases = new OpenCodeProjectInstanceLeaseCoordinator((error, directory) => {
+      this.logger.warn(
+        { err: error, directory },
+        "OpenCode project instance disposal failed; the next acquisition will retry",
+      );
+    });
     this.runtimeSettings = options.runtimeSettings;
     this.helperRuntimeSettings = canonicalizeOpenCodeHelperRuntimeSettings(this.runtimeSettings);
     this.managedProcesses = options.managedProcesses;
@@ -503,6 +512,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     await Promise.all(Array.from(servers, (server) => this.killServer(server)));
     this.currentServer = null;
     this.startingServers.clear();
+    this.projectInstanceLeases.clear();
   }
 
   private async killServer(server: OpenCodeServerGeneration): Promise<void> {

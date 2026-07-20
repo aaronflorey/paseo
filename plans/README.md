@@ -12,7 +12,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [001](001-redact-runtime-settings-logs.md)        | Redact OpenCode runtime-settings conflicts         | P1       | S      | —                            | DONE   |
 | [002](002-preserve-client-wrapper-contract.md)    | Preserve the full client wrapper contract          | P1       | M      | —                            | DONE   |
 | [003](003-reject-conflicting-runtime-settings.md) | Reject conflicting OpenCode helper settings        | P1       | M      | 001, 002                     | DONE   |
-| [004](004-share-project-lease-coordinator.md)     | Share project leases across OpenCode clients       | P1       | M      | —                            | TODO   |
+| [004](004-share-project-lease-coordinator.md)     | Share project leases across OpenCode clients       | P1       | M      | —                            | DONE   |
 | [005](005-lease-child-session-directories.md)     | Lease child-session operations by directory        | P1       | L      | 004                          | TODO   |
 | [006](006-drain-event-callbacks.md)               | Drain in-flight global-event callbacks             | P1       | M      | —                            | TODO   |
 | [007](007-reconnect-global-event-streams.md)      | Reconnect dead global event streams                | P1       | L      | 006                          | TODO   |

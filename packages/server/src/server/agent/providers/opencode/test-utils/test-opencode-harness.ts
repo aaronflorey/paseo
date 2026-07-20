@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
 import type { OpenCodeServerAcquisition, OpenCodeServerManagerLike } from "../server-manager.js";
+import { OpenCodeProjectInstanceLeaseCoordinator } from "../project-instance-leases.js";
 
 interface OpenCodeResponse {
   data?: unknown;
@@ -10,6 +11,7 @@ interface OpenCodeResponse {
 let nextTestOpenCodePort = 12_340;
 
 export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
+  readonly projectInstanceLeases = new OpenCodeProjectInstanceLeaseCoordinator(() => undefined);
   readonly acquisitions: Array<{
     kind: "current" | "new" | "existing";
     env?: Record<string, string>;
@@ -68,7 +70,9 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
     return client.asSdkClient();
   };
 
-  async shutdown(): Promise<void> {}
+  async shutdown(): Promise<void> {
+    this.projectInstanceLeases.clear();
+  }
 }
 
 export class TestOpenCodeClient {

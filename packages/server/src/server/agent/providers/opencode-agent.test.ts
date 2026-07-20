@@ -213,6 +213,58 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     rmSync(cwd, { recursive: true, force: true });
   }, 60_000);
 
+  test("shares project instance leases across clients using the same helper", async () => {
+    const sharedDirectory = tmpCwd();
+    const firstDirectory = tmpCwd();
+    const secondDirectory = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const sharedFirstSdk = new TestOpenCodeClient();
+    const sharedSecondSdk = new TestOpenCodeClient();
+    const firstDirectorySdk = new TestOpenCodeClient();
+    const secondDirectorySdk = new TestOpenCodeClient();
+    for (const sdkClient of [
+      sharedFirstSdk,
+      sharedSecondSdk,
+      firstDirectorySdk,
+      secondDirectorySdk,
+    ]) {
+      runtime.enqueueClient(sdkClient);
+    }
+    const firstClient = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const secondClient = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+
+    const sharedFirst = await firstClient.createSession(buildConfig(sharedDirectory));
+    const sharedSecond = await secondClient.createSession(buildConfig(sharedDirectory));
+
+    await sharedFirst.close();
+    expect([
+      ...sharedFirstSdk.calls.instanceDispose,
+      ...sharedSecondSdk.calls.instanceDispose,
+    ]).toEqual([]);
+    await sharedSecond.close();
+    expect([
+      ...sharedFirstSdk.calls.instanceDispose,
+      ...sharedSecondSdk.calls.instanceDispose,
+    ]).toEqual([{ directory: sharedDirectory }]);
+
+    const firstDirectorySession = await firstClient.createSession(buildConfig(firstDirectory));
+    const secondDirectorySession = await secondClient.createSession(buildConfig(secondDirectory));
+    await firstDirectorySession.close();
+    await secondDirectorySession.close();
+
+    expect(firstDirectorySdk.calls.instanceDispose).toEqual([{ directory: firstDirectory }]);
+    expect(secondDirectorySdk.calls.instanceDispose).toEqual([{ directory: secondDirectory }]);
+    for (const directory of [sharedDirectory, firstDirectory, secondDirectory]) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test("archives and unarchives the durable native session through client hooks", async () => {
     const cwd = tmpCwd();
     const runtime = new TestOpenCodeHarness();
