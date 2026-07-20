@@ -116,6 +116,7 @@ export interface OpenCodeServerAcquisition {
 
 export interface OpenCodeServerManagerLike {
   readonly projectInstanceLeases: OpenCodeProjectInstanceLeaseCoordinator;
+  registerGenerationCleanup(serverGeneration: object, cleanup: () => void): () => void;
   acquireCurrent(): Promise<OpenCodeServerAcquisition>;
   acquireNew(): Promise<OpenCodeServerAcquisition>;
   acquireExisting(url: string): OpenCodeServerAcquisition | null;
@@ -171,6 +172,8 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
   private readonly resolveHomeDir: () => string;
   private readonly resolveSharedLaunchEnv?: () => Promise<Record<string, string>>;
   private readonly spawnServerProcess: OpenCodeServerProcessSpawner;
+  private readonly generationCleanups = new Map<object, Set<() => void>>();
+  private readonly endedGenerations = new WeakSet<object>();
 
   constructor(options: OpenCodeServerManagerOptions) {
     this.logger = options.logger;
@@ -219,6 +222,31 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       }
     }
     return OpenCodeServerManager.instance;
+  }
+
+  registerGenerationCleanup(serverGeneration: object, cleanup: () => void): () => void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      cleanup();
+      return () => undefined;
+    }
+    let cleanups = this.generationCleanups.get(serverGeneration);
+    if (!cleanups) {
+      cleanups = new Set();
+      this.generationCleanups.set(serverGeneration, cleanups);
+    }
+    cleanups.add(cleanup);
+    let registered = true;
+    return () => {
+      if (!registered) {
+        return;
+      }
+      registered = false;
+      const current = this.generationCleanups.get(serverGeneration);
+      current?.delete(cleanup);
+      if (current?.size === 0) {
+        this.generationCleanups.delete(serverGeneration);
+      }
+    };
   }
 
   private static registerExitHandler(): void {
@@ -474,6 +502,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
 
       serverProcess.on("exit", (code) => {
         this.startingServers.delete(server);
+        this.runGenerationCleanups(server);
         this.removeManagedServerRecord(server);
         if (!started) {
           failStartup(
@@ -520,6 +549,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       (server.process.exitCode !== null && server.process.exitCode !== undefined) ||
       (server.process.signalCode !== null && server.process.signalCode !== undefined)
     ) {
+      this.runGenerationCleanups(server);
       return;
     }
     const result = await this.terminateProcess(server.process, {
@@ -539,6 +569,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       );
       return;
     }
+    this.runGenerationCleanups(server);
     if (server.managedProcessId) {
       await this.removeManagedProcessId(server.managedProcessId);
       server.managedProcessId = undefined;
@@ -573,6 +604,25 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
         "Failed to record OpenCode helper process",
       );
       return null;
+    }
+  }
+
+  private runGenerationCleanups(serverGeneration: object): void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      return;
+    }
+    this.endedGenerations.add(serverGeneration);
+    const cleanups = this.generationCleanups.get(serverGeneration);
+    this.generationCleanups.delete(serverGeneration);
+    if (!cleanups) {
+      return;
+    }
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch {
+        this.logger.warn("OpenCode server generation cleanup failed");
+      }
     }
   }
 

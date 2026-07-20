@@ -20,12 +20,45 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
   }> = [];
   readonly clientCreations: Array<{ baseUrl: string; directory: string }> = [];
   private readonly clients: TestOpenCodeClient[] = [];
-  private readonly globalEventStream = createQueuedEventStream();
+  private globalEventStream = createQueuedEventStream();
 
   readonly server = (() => {
     const port = nextTestOpenCodePort++;
-    return { port, url: `http://127.0.0.1:${port}`, generation: {} };
+    return { port, url: `http://127.0.0.1:${port}`, generation: {} as object };
   })();
+  private readonly generationCleanups = new Map<object, Set<() => void>>();
+  private readonly endedGenerations = new WeakSet<object>();
+
+  registerGenerationCleanup(serverGeneration: object, cleanup: () => void): () => void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      cleanup();
+      return () => undefined;
+    }
+    const cleanups = this.generationCleanups.get(serverGeneration) ?? new Set();
+    cleanups.add(cleanup);
+    this.generationCleanups.set(serverGeneration, cleanups);
+    return () => {
+      cleanups.delete(cleanup);
+    };
+  }
+
+  endGeneration(serverGeneration: object = this.server.generation): void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      return;
+    }
+    this.endedGenerations.add(serverGeneration);
+    const cleanups = this.generationCleanups.get(serverGeneration);
+    this.generationCleanups.delete(serverGeneration);
+    for (const cleanup of cleanups ?? []) {
+      cleanup();
+    }
+  }
+
+  rotateGeneration(): void {
+    this.endGeneration();
+    this.server.generation = {};
+    this.globalEventStream = createQueuedEventStream();
+  }
 
   enqueueClient(client: TestOpenCodeClient): void {
     this.clients.push(client);
@@ -71,6 +104,7 @@ export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
   };
 
   async shutdown(): Promise<void> {
+    this.endGeneration();
     this.projectInstanceLeases.clear();
   }
 }

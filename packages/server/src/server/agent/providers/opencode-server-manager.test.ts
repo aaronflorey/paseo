@@ -121,6 +121,55 @@ describe("OpenCodeServerManager generations", () => {
     expect(runtime.terminatedPorts).toEqual([4451]);
   });
 
+  test("runs generation cleanup once after natural process exit", async () => {
+    const { manager, runtime } = createTestManager([4452]);
+    const acquisition = await manager.acquireCurrent();
+    const cleanup = vi.fn();
+    manager.registerGenerationCleanup(acquisition.server.generation, cleanup);
+
+    runtime.processForPort(4452).exitNormally();
+    runtime.processForPort(4452).exitNormally();
+    await runtime.settle();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  test("runs generation cleanup after confirmed release and shutdown termination", async () => {
+    const { manager, runtime } = createTestManager([4453, 4454]);
+    const released = await manager.acquireCurrent();
+    const releaseCleanup = vi.fn();
+    manager.registerGenerationCleanup(released.server.generation, releaseCleanup);
+
+    await released.release();
+    expect(releaseCleanup).toHaveBeenCalledTimes(1);
+
+    const shutdownGeneration = await manager.acquireCurrent();
+    const shutdownCleanup = vi.fn();
+    manager.registerGenerationCleanup(shutdownGeneration.server.generation, shutdownCleanup);
+    await manager.shutdown();
+
+    expect(runtime.terminatedPorts).toEqual([4453, 4454]);
+    expect(shutdownCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  test("delays generation cleanup after kill-timeout until a later exit", async () => {
+    const { manager, runtime } = createTestManager([4455], {
+      terminateResult: "kill-timeout",
+    });
+    const acquisition = await manager.acquireCurrent();
+    const cleanup = vi.fn();
+    manager.registerGenerationCleanup(acquisition.server.generation, cleanup);
+
+    await manager.shutdown();
+    expect(cleanup).not.toHaveBeenCalled();
+
+    runtime.processForPort(4455).exitNormally();
+    runtime.processForPort(4455).exitNormally();
+    await runtime.settle();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   test("startup timeout kills the spawned server and removes its managed-process record", async () => {
     vi.useFakeTimers();
     const { manager, runtime } = createTestManager([4471], { autoAnnounce: false });

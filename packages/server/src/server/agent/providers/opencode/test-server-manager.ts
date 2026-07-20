@@ -11,7 +11,39 @@ export interface TestOpenCodeServerAcquisition {
 export class TestOpenCodeServerManager implements OpenCodeServerManagerLike {
   readonly projectInstanceLeases = new OpenCodeProjectInstanceLeaseCoordinator(() => undefined);
   readonly acquisitions: TestOpenCodeServerAcquisition[] = [];
-  readonly server = { port: 1234, url: "http://127.0.0.1:1234", generation: {} };
+  readonly server = { port: 1234, url: "http://127.0.0.1:1234", generation: {} as object };
+  private readonly generationCleanups = new Map<object, Set<() => void>>();
+  private readonly endedGenerations = new WeakSet<object>();
+
+  registerGenerationCleanup(serverGeneration: object, cleanup: () => void): () => void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      cleanup();
+      return () => undefined;
+    }
+    const cleanups = this.generationCleanups.get(serverGeneration) ?? new Set();
+    cleanups.add(cleanup);
+    this.generationCleanups.set(serverGeneration, cleanups);
+    return () => {
+      cleanups.delete(cleanup);
+    };
+  }
+
+  endGeneration(serverGeneration: object = this.server.generation): void {
+    if (this.endedGenerations.has(serverGeneration)) {
+      return;
+    }
+    this.endedGenerations.add(serverGeneration);
+    const cleanups = this.generationCleanups.get(serverGeneration);
+    this.generationCleanups.delete(serverGeneration);
+    for (const cleanup of cleanups ?? []) {
+      cleanup();
+    }
+  }
+
+  rotateGeneration(): void {
+    this.endGeneration();
+    this.server.generation = {};
+  }
 
   async acquireCurrent(): Promise<OpenCodeServerAcquisition> {
     return this.recordAcquisition({ kind: "current" });
@@ -46,6 +78,7 @@ export class TestOpenCodeServerManager implements OpenCodeServerManagerLike {
   }
 
   async shutdown(): Promise<void> {
+    this.endGeneration();
     this.projectInstanceLeases.clear();
   }
 }

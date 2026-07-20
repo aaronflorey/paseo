@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import pino from "pino";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { Event as OpenCodeEvent } from "@opencode-ai/sdk/v2/client";
@@ -1351,6 +1352,74 @@ describe("OpenCode adapter startTurn error handling", () => {
     }
   });
 
+  test("releases project MCP metadata across helper generation rotations", async () => {
+    const baselineGenerationCount = __openCodeInternals.getOpenCodeProjectMcpGenerationCount();
+    const runtime = new TestOpenCodeHarness();
+    const logLines: string[] = [];
+    const logger = pino(
+      { level: "trace" },
+      {
+        write(message) {
+          logLines.push(message);
+        },
+      },
+    );
+    const cwd = tmpCwd();
+    const canaries = [
+      "first-generation-credential-canary",
+      "second-generation-credential-canary",
+      "third-generation-credential-canary",
+    ];
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+
+    try {
+      for (const [index, canary] of canaries.entries()) {
+        const openCodeClient = new TestOpenCodeClient();
+        const sessionId = `session-mcp-generation-${index}`;
+        openCodeClient.sessionCreateResponse = { data: { id: sessionId } };
+        openCodeClient.sessionPromptAsyncEvents = [
+          { type: "session.idle", properties: { sessionID: sessionId } },
+        ];
+        runtime.enqueueClient(openCodeClient);
+
+        const session = await client.createSession({
+          provider: "opencode",
+          cwd,
+          mcpServers: {
+            custom: {
+              type: "http",
+              url: `http://127.0.0.1:${7100 + index}/mcp`,
+              headers: { Authorization: `Bearer ${canary}` },
+            },
+          },
+        });
+
+        const result = await collectTurnEvents(streamSession(session, `turn-${index}`));
+        expect(result.turnCompleted).toBe(true);
+        expect(__openCodeInternals.getOpenCodeProjectMcpGenerationCount()).toBe(
+          baselineGenerationCount + 1,
+        );
+
+        await session.close();
+        runtime.rotateGeneration();
+        expect(__openCodeInternals.getOpenCodeProjectMcpGenerationCount()).toBe(
+          baselineGenerationCount,
+        );
+      }
+
+      const diagnostics = logLines.join("\n");
+      for (const canary of canaries) {
+        expect(diagnostics).not.toContain(canary);
+      }
+    } finally {
+      await client.shutdown();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("rejects conflicting project-scoped MCP configs on the shared server", async () => {
     const runtime = new TestOpenCodeHarness();
     const firstClient = new TestOpenCodeClient();
@@ -1364,7 +1433,18 @@ describe("OpenCode adapter startTurn error handling", () => {
     runtime.enqueueClient(secondClient);
     const cwd = tmpCwd();
     const equivalentCwd = `${cwd}/.`;
-    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+    const firstCanary = "live-first-credential-canary";
+    const secondCanary = "live-second-credential-canary";
+    const logLines: string[] = [];
+    const logger = pino(
+      { level: "trace" },
+      {
+        write(message) {
+          logLines.push(message);
+        },
+      },
+    );
+    const client = new OpenCodeAgentClient(logger, undefined, {
       serverManager: runtime,
       createClient: runtime.createClient,
     });
@@ -1374,21 +1454,39 @@ describe("OpenCode adapter startTurn error handling", () => {
         provider: "opencode",
         cwd,
         mcpServers: {
-          custom: { type: "http", url: "http://127.0.0.1:7001/mcp" },
+          custom: {
+            type: "http",
+            url: "http://127.0.0.1:7001/mcp",
+            headers: { Authorization: `Bearer ${firstCanary}` },
+          },
         },
       });
       const second = await client.createSession({
         provider: "opencode",
         cwd: equivalentCwd,
         mcpServers: {
-          custom: { type: "http", url: "http://127.0.0.1:7002/mcp" },
+          custom: {
+            type: "http",
+            url: "http://127.0.0.1:7002/mcp",
+            headers: { Authorization: `Bearer ${secondCanary}` },
+          },
         },
       });
 
       await collectTurnEvents(streamSession(first, "first"));
-      await expect(collectTurnEvents(streamSession(second, "second"))).rejects.toThrow(
+      let conflictError: unknown;
+      try {
+        await collectTurnEvents(streamSession(second, "second"));
+      } catch (error) {
+        conflictError = error;
+      }
+      expect(conflictError).toBeInstanceOf(Error);
+      expect((conflictError as Error).message).toContain(
         "already has a different project-scoped configuration",
       );
+      const diagnostics = `${String(conflictError)}\n${logLines.join("\n")}`;
+      expect(diagnostics).not.toContain(firstCanary);
+      expect(diagnostics).not.toContain(secondCanary);
 
       await second.close();
       await first.close();

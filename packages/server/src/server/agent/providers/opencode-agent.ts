@@ -355,10 +355,13 @@ type OpenCodeMcpConfig =
       enabled?: boolean;
     };
 
-const openCodeProjectMcpConfigs = new Map<
-  object,
-  Map<string, { serializedConfig: string; ready: Promise<void> }>
->();
+interface OpenCodeProjectMcpConfigState {
+  owner: object;
+  registrations: Map<string, { serializedConfig: string; ready: Promise<void> }>;
+  unregisterGenerationCleanup: () => void;
+}
+
+const openCodeProjectMcpConfigs = new Map<object, OpenCodeProjectMcpConfigState>();
 const OPENCODE_PROVIDER_LIST_TIMEOUT_MS = 30_000;
 const OPENCODE_METADATA_CONCURRENCY = 4;
 const openCodeMetadataLimit = pLimit(OPENCODE_METADATA_CONCURRENCY);
@@ -1350,6 +1353,7 @@ export const __openCodeInternals = {
   mergeOpenCodeStepFinishUsage,
   parseOpenCodeModelLookupKey,
   resolveOpenCodeEventStreamReconnectDelayMs,
+  getOpenCodeProjectMcpGenerationCount: () => openCodeProjectMcpConfigs.size,
   resolveOpenCodeModelLookupKeyFromAssistantMessage,
   resolveOpenCodeSelectedModelContextWindow,
   isSelectableOpenCodeAgent,
@@ -1488,6 +1492,7 @@ export class OpenCodeAgentClient implements AgentClient {
         toOpenCodeSessionContext(launchContext),
         acquisition.server.generation,
         this.serverManager.projectInstanceLeases,
+        this.serverManager.registerGenerationCleanup.bind(this.serverManager),
       );
     } catch (error) {
       await scope.release();
@@ -1539,6 +1544,7 @@ export class OpenCodeAgentClient implements AgentClient {
         toOpenCodeSessionContext(launchContext),
         acquisition.server.generation,
         this.serverManager.projectInstanceLeases,
+        this.serverManager.registerGenerationCleanup.bind(this.serverManager),
       );
     } catch (error) {
       await scope.release();
@@ -3672,6 +3678,7 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly sessionContext?: OpenCodeSessionContext,
     private readonly serverGeneration: object = client,
     private readonly projectInstanceLeases?: OpenCodeProjectInstanceLeaseCoordinator,
+    private readonly registerGenerationCleanup?: OpenCodeServerManagerLike["registerGenerationCleanup"],
   ) {
     this.config = config;
     this.matchesSessionDirectory = createPathEquivalenceMatcher(config.cwd);
@@ -4923,11 +4930,24 @@ class OpenCodeAgentSession implements AgentSession {
   }
 
   private async registerMcpServer(name: string, config: OpenCodeMcpConfig): Promise<void> {
-    let projectRegistrations = openCodeProjectMcpConfigs.get(this.serverGeneration);
-    if (!projectRegistrations) {
-      projectRegistrations = new Map();
-      openCodeProjectMcpConfigs.set(this.serverGeneration, projectRegistrations);
+    let generationState = openCodeProjectMcpConfigs.get(this.serverGeneration);
+    if (!generationState) {
+      const serverGeneration = this.serverGeneration;
+      const owner = {};
+      generationState = {
+        owner,
+        registrations: new Map(),
+        unregisterGenerationCleanup: () => undefined,
+      };
+      openCodeProjectMcpConfigs.set(this.serverGeneration, generationState);
+      generationState.unregisterGenerationCleanup =
+        this.registerGenerationCleanup?.(serverGeneration, () => {
+          if (openCodeProjectMcpConfigs.get(serverGeneration)?.owner === owner) {
+            openCodeProjectMcpConfigs.delete(serverGeneration);
+          }
+        }) ?? (() => undefined);
     }
+    const projectRegistrations = generationState.registrations;
     const registrationKey = `${normalizePathForIdentity(this.config.cwd)}\0${name}`;
     const serializedConfig = serializeOpenCodeMcpConfig(config);
     const registration = projectRegistrations.get(registrationKey);
@@ -4953,8 +4973,12 @@ class OpenCodeAgentSession implements AgentSession {
     } catch (error) {
       if (projectRegistrations.get(registrationKey)?.ready === ready) {
         projectRegistrations.delete(registrationKey);
-        if (projectRegistrations.size === 0) {
+        if (
+          projectRegistrations.size === 0 &&
+          openCodeProjectMcpConfigs.get(this.serverGeneration) === generationState
+        ) {
           openCodeProjectMcpConfigs.delete(this.serverGeneration);
+          generationState.unregisterGenerationCleanup();
         }
       }
       throw error;

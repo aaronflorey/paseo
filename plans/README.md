@@ -18,7 +18,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [007](007-reconnect-global-event-streams.md)      | Reconnect dead global event streams                | P1       | L      | 006                          | DONE   |
 | [008](008-bound-close-abort.md)                   | Bound OpenCode abort during close                  | P1       | S      | 006                          | DONE   |
 | [009](009-retain-force-kill-process-record.md)    | Retain unconfirmed managed-process records         | P1       | S      | —                            | DONE   |
-| [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | TODO   |
+| [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | DONE   |
 | [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | TODO   |
 | [012](012-detect-split-readiness-output.md)       | Detect split helper-readiness output               | P2       | S      | —                            | TODO   |
 | [013](013-handle-external-request-resolution.md)  | Handle external permission and question resolution | P1       | M      | 005, 007                     | TODO   |
