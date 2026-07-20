@@ -20,7 +20,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [009](009-retain-force-kill-process-record.md)    | Retain unconfirmed managed-process records         | P1       | S      | —                            | DONE   |
 | [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | DONE   |
 | [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | DONE   |
-| [012](012-detect-split-readiness-output.md)       | Detect split helper-readiness output               | P2       | S      | —                            | TODO   |
+| [012](012-detect-split-readiness-output.md)       | Detect split helper-readiness output               | P2       | S      | —                            | DONE   |
 | [013](013-handle-external-request-resolution.md)  | Handle external permission and question resolution | P1       | M      | 005, 007                     | TODO   |
 | [014](014-run-invalid-model-regression.md)        | Put invalid-model coverage in the CLI runner       | P2       | M      | —                            | TODO   |
 | [015](015-stabilize-interrupt-follow-up-e2e.md)   | Stabilize interrupt-to-follow-up E2E tracking      | P2       | M      | —                            | TODO   |

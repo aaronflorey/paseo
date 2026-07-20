@@ -20,6 +20,7 @@ import { OpenCodeProjectInstanceLeaseCoordinator } from "./project-instance-leas
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
 const OPENCODE_CONFIG_CONTENT_ENV_KEY = "OPENCODE_CONFIG_CONTENT";
+const OPENCODE_SERVER_READY_OUTPUT = "listening on";
 
 type OpenCodeHelperRuntimeSettingCategory = "command" | "args" | "env" | "configContent";
 
@@ -441,6 +442,7 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
     let settled = false;
     let stderrBuffer = "";
     let stdoutBuffer = "";
+    let readinessTail = "";
     const STARTUP_BUFFER_CAP = 8192;
     const appendCapped = (current: string, chunk: string): string => {
       if (current.length >= STARTUP_BUFFER_CAP) {
@@ -481,7 +483,9 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       serverProcess.stdout?.on("data", (data: Buffer) => {
         const output = data.toString();
         stdoutBuffer = appendCapped(stdoutBuffer, output);
-        if (output.includes("listening on") && !settled) {
+        const readinessOutput = readinessTail + output;
+        readinessTail = readinessOutput.slice(-(OPENCODE_SERVER_READY_OUTPUT.length - 1));
+        if (readinessOutput.includes(OPENCODE_SERVER_READY_OUTPUT) && !settled) {
           started = true;
           settled = true;
           clearTimeout(timeout);

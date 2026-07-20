@@ -170,6 +170,98 @@ describe("OpenCodeServerManager generations", () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  test("detects helper readiness at every stdout chunk boundary", async () => {
+    const readinessText = "listening on";
+
+    for (let splitIndex = 1; splitIndex < readinessText.length; splitIndex += 1) {
+      const port = 4455 + splitIndex;
+      const { manager, runtime } = createTestManager([port], { autoAnnounce: false });
+      const acquisitionPromise = manager.acquireCurrent();
+      let acquisitionSettled = false;
+      void acquisitionPromise.then(
+        () => {
+          acquisitionSettled = true;
+          return undefined;
+        },
+        () => {
+          acquisitionSettled = true;
+          return undefined;
+        },
+      );
+
+      try {
+        await runtime.settle();
+        const process = runtime.processForPort(port);
+        process.emitStdoutChunks(readinessText.slice(0, splitIndex));
+        await runtime.settle();
+        expect(acquisitionSettled, `split ${splitIndex} resolved from incomplete text`).toBe(false);
+
+        process.emitStdoutChunks(readinessText.slice(splitIndex));
+        await acquisitionPromise;
+        expect(acquisitionSettled, `split ${splitIndex} did not resolve`).toBe(true);
+      } finally {
+        if (!acquisitionSettled) {
+          runtime.processForPort(port).announceListening();
+        }
+        const acquisition = await acquisitionPromise;
+        await acquisition.release();
+        await manager.shutdown();
+      }
+    }
+  });
+
+  test("detects split readiness after prefix noise but ignores wrong text", async () => {
+    const { manager, runtime } = createTestManager([4468], { autoAnnounce: false });
+    const acquisitionPromise = manager.acquireCurrent();
+    let acquisitionSettled = false;
+    void acquisitionPromise.then(
+      () => {
+        acquisitionSettled = true;
+        return undefined;
+      },
+      () => {
+        acquisitionSettled = true;
+        return undefined;
+      },
+    );
+
+    try {
+      await runtime.settle();
+      const process = runtime.processForPort(4468);
+      process.emitStdoutChunks("startup noise: listen", "ing of");
+      await runtime.settle();
+      expect(acquisitionSettled).toBe(false);
+
+      process.emitStdoutChunks("\nmore noise\nlisten", "ing ", "on at http://127.0.0.1");
+      await acquisitionPromise;
+      expect(acquisitionSettled).toBe(true);
+    } finally {
+      if (!acquisitionSettled) {
+        runtime.processForPort(4468).announceListening();
+      }
+      const acquisition = await acquisitionPromise;
+      await acquisition.release();
+      await manager.shutdown();
+    }
+  });
+
+  test("detects split readiness when the diagnostic buffer fills between chunks", async () => {
+    const { manager, runtime } = createTestManager([4469], { autoAnnounce: false });
+    const acquisitionPromise = manager.acquireCurrent();
+
+    try {
+      await runtime.settle();
+      runtime.processForPort(4469).emitStdoutChunks(`${"x".repeat(8190)}li`, "stening on");
+
+      const acquisition = await acquisitionPromise;
+      expect(acquisition.server.url).toBe("http://127.0.0.1:4469");
+    } finally {
+      const acquisition = await acquisitionPromise;
+      await acquisition.release();
+      await manager.shutdown();
+    }
+  });
+
   test("startup timeout kills the spawned server and removes its managed-process record", async () => {
     vi.useFakeTimers();
     const { manager, runtime } = createTestManager([4471], { autoAnnounce: false });
@@ -798,7 +890,13 @@ class FakeOpenCodeProcess extends EventEmitter {
   }
 
   announceListening(): void {
-    this.stdout.emit("data", Buffer.from("listening on"));
+    this.emitStdoutChunks("listening on");
+  }
+
+  emitStdoutChunks(...chunks: string[]): void {
+    for (const chunk of chunks) {
+      this.stdout.emit("data", Buffer.from(chunk));
+    }
   }
 
   exitNormally(): void {
