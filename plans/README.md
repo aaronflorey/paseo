@@ -21,7 +21,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | DONE   |
 | [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | DONE   |
 | [012](012-detect-split-readiness-output.md)       | Detect split helper-readiness output               | P2       | S      | —                            | DONE   |
-| [013](013-handle-external-request-resolution.md)  | Handle external permission and question resolution | P1       | M      | 005, 007                     | TODO   |
+| [013](013-handle-external-request-resolution.md)  | Handle external permission and question resolution | P1       | M      | 005, 007                     | DONE   |
 | [014](014-run-invalid-model-regression.md)        | Put invalid-model coverage in the CLI runner       | P2       | M      | —                            | TODO   |
 | [015](015-stabilize-interrupt-follow-up-e2e.md)   | Stabilize interrupt-to-follow-up E2E tracking      | P2       | M      | —                            | TODO   |
 | [016](016-execute-generated-plugin-contracts.md)  | Execute generated OpenCode plugins in tests        | P2       | M      | —                            | TODO   |

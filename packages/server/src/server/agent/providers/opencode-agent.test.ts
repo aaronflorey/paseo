@@ -20,11 +20,198 @@ import {
 import { openCodeSessionContextRegistry } from "./opencode/session-context.js";
 import type {
   AgentSessionConfig,
+  AgentSession,
   AgentStreamEvent,
   ToolCallTimelineItem,
   AssistantMessageTimelineItem,
   AgentTimelineItem,
 } from "../agent-sdk-types.js";
+
+type OpenCodeExternalResolutionOutcome =
+  | "permission_once"
+  | "permission_always"
+  | "permission_reject"
+  | "question_replied"
+  | "question_rejected";
+
+interface OpenCodeExternalResolutionCase {
+  outcome: OpenCodeExternalResolutionOutcome;
+  requestKind: "permission" | "question";
+  expectedBehavior: "allow" | "deny";
+}
+
+const OPEN_CODE_EXTERNAL_RESOLUTION_CASES: readonly OpenCodeExternalResolutionCase[] = [
+  { outcome: "permission_once", requestKind: "permission", expectedBehavior: "allow" },
+  { outcome: "permission_always", requestKind: "permission", expectedBehavior: "allow" },
+  { outcome: "permission_reject", requestKind: "permission", expectedBehavior: "deny" },
+  { outcome: "question_replied", requestKind: "question", expectedBehavior: "allow" },
+  { outcome: "question_rejected", requestKind: "question", expectedBehavior: "deny" },
+];
+
+function buildOpenCodeExternalRequestAskedEvent(options: {
+  requestId: string;
+  requestKind: OpenCodeExternalResolutionCase["requestKind"];
+  sessionId: string;
+}): OpenCodeEvent {
+  if (options.requestKind === "permission") {
+    return {
+      id: `asked:${options.requestId}`,
+      type: "permission.asked",
+      properties: {
+        id: options.requestId,
+        sessionID: options.sessionId,
+        permission: "bash",
+        patterns: ["npm test"],
+        metadata: { command: "npm test" },
+        always: [],
+      },
+    };
+  }
+  return {
+    id: `asked:${options.requestId}`,
+    type: "question.asked",
+    properties: {
+      id: options.requestId,
+      sessionID: options.sessionId,
+      questions: [
+        {
+          question: "Continue?",
+          header: "Continue",
+          options: [{ label: "Yes", description: "Continue working" }],
+        },
+      ],
+    },
+  };
+}
+
+function buildOpenCodeExternalResolutionEvent(options: {
+  eventId: string;
+  outcome: OpenCodeExternalResolutionOutcome;
+  requestId: string;
+  sessionId: string;
+}): OpenCodeEvent {
+  switch (options.outcome) {
+    case "permission_once":
+    case "permission_always":
+    case "permission_reject": {
+      let reply: "once" | "always" | "reject" = "reject";
+      if (options.outcome === "permission_once") {
+        reply = "once";
+      } else if (options.outcome === "permission_always") {
+        reply = "always";
+      }
+      return {
+        id: options.eventId,
+        type: "permission.replied",
+        properties: {
+          sessionID: options.sessionId,
+          requestID: options.requestId,
+          reply,
+        },
+      };
+    }
+    case "question_replied":
+      return {
+        id: options.eventId,
+        type: "question.replied",
+        properties: {
+          sessionID: options.sessionId,
+          requestID: options.requestId,
+          answers: [["Yes"]],
+        },
+      };
+    case "question_rejected":
+      return {
+        id: options.eventId,
+        type: "question.rejected",
+        properties: {
+          sessionID: options.sessionId,
+          requestID: options.requestId,
+        },
+      };
+  }
+}
+
+async function expectOpenCodeExternalResolutionCases(options: {
+  client: TestOpenCodeClient;
+  session: AgentSession;
+  sessionId: string;
+}): Promise<void> {
+  const events: AgentStreamEvent[] = [];
+  const pendingRequestIdsAtDispatch = new Map<string, string[]>();
+  const unsubscribe = options.session.subscribe((event) => {
+    events.push(event);
+    if (event.type === "permission_resolved") {
+      pendingRequestIdsAtDispatch.set(
+        event.requestId,
+        options.session.getPendingPermissions().map((request) => request.id),
+      );
+    }
+  });
+
+  try {
+    for (const resolutionCase of OPEN_CODE_EXTERNAL_RESOLUTION_CASES) {
+      const requestId = `${options.sessionId}:${resolutionCase.outcome}`;
+      options.client.emitEvent(
+        buildOpenCodeExternalRequestAskedEvent({
+          requestId,
+          requestKind: resolutionCase.requestKind,
+          sessionId: options.sessionId,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(options.session.getPendingPermissions()).toContainEqual(
+          expect.objectContaining({ id: requestId }),
+        ),
+      );
+
+      const resolution = buildOpenCodeExternalResolutionEvent({
+        eventId: `resolved:${requestId}`,
+        outcome: resolutionCase.outcome,
+        requestId,
+        sessionId: options.sessionId,
+      });
+      options.client.emitEvent(resolution);
+      options.client.emitEvent(resolution);
+      options.client.emitEvent(
+        buildOpenCodeExternalResolutionEvent({
+          eventId: `resolved-duplicate:${requestId}`,
+          outcome: resolutionCase.outcome,
+          requestId,
+          sessionId: options.sessionId,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(
+          events.filter(
+            (event) => event.type === "permission_resolved" && event.requestId === requestId,
+          ),
+        ).toEqual([
+          {
+            type: "permission_resolved",
+            provider: "opencode",
+            requestId,
+            resolution: { behavior: resolutionCase.expectedBehavior },
+          },
+        ]);
+      });
+      expect(options.session.getPendingPermissions()).not.toContainEqual(
+        expect.objectContaining({ id: requestId }),
+      );
+      expect(pendingRequestIdsAtDispatch.get(requestId)).toEqual([]);
+      await expect(
+        options.session.respondToPermission(requestId, { behavior: "allow" }),
+      ).rejects.toThrow(`No pending permission request with id '${requestId}'`);
+    }
+  } finally {
+    unsubscribe();
+  }
+
+  expect(options.client.calls.permissionReply).toEqual([]);
+  expect(options.client.calls.questionReply).toEqual([]);
+  expect(options.client.calls.questionReject).toEqual([]);
+}
 
 function tmpCwd(): string {
   const dir = mkdtempSync(path.join(os.tmpdir(), "opencode-agent-test-"));
@@ -3182,6 +3369,206 @@ describe("OpenCode provider subagent contract", () => {
     );
     return { runtime, provider: client, parent, child, childClient };
   }
+
+  test("maps upstream permission and question resolutions without answer details", () => {
+    const sessionId = "ses_resolution_translation";
+    const state = createOpenCodeTranslationState(sessionId);
+
+    for (const resolutionCase of OPEN_CODE_EXTERNAL_RESOLUTION_CASES) {
+      const requestId = `request:${resolutionCase.outcome}`;
+      expect(
+        translateOpenCodeEvent(
+          buildOpenCodeExternalResolutionEvent({
+            eventId: `event:${resolutionCase.outcome}`,
+            outcome: resolutionCase.outcome,
+            requestId,
+            sessionId,
+          }),
+          state,
+        ),
+      ).toEqual([
+        {
+          type: "permission_resolved",
+          provider: "opencode",
+          requestId,
+          resolution: { behavior: resolutionCase.expectedBehavior },
+        },
+      ]);
+    }
+  });
+
+  test("consumes external parent request resolutions exactly once", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionCreateResponse = { data: { id: "ses_parent_resolution" } };
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/parent-resolution",
+    });
+
+    try {
+      await expectOpenCodeExternalResolutionCases({
+        client: openCodeClient,
+        session,
+        sessionId: "ses_parent_resolution",
+      });
+    } finally {
+      await session.close();
+      await client.shutdown();
+    }
+  });
+
+  test("consumes external cross-directory child request resolutions", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionCreateResponse = { data: { id: "ses_parent_child_resolution" } };
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/parent-resolution",
+    });
+    const childEvents: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => childEvents.push(event));
+
+    try {
+      openCodeClient.emitEvent({
+        id: "child-created:ses_child_resolution",
+        type: "session.created",
+        properties: {
+          info: {
+            id: "ses_child_resolution",
+            parentID: "ses_parent_child_resolution",
+            title: "Resolution child",
+            directory: "/workspace/child-resolution",
+          },
+        },
+      });
+      await vi.waitFor(() =>
+        expect(childEvents).toContainEqual(
+          expect.objectContaining({
+            type: "provider_subagent",
+            event: expect.objectContaining({ id: "ses_child_resolution" }),
+          }),
+        ),
+      );
+      unsubscribe();
+
+      await expectOpenCodeExternalResolutionCases({
+        client: openCodeClient,
+        session,
+        sessionId: "ses_child_resolution",
+      });
+      expect(openCodeClient.calls.instanceDispose).toEqual([]);
+    } finally {
+      unsubscribe();
+      await session.close();
+      await client.shutdown();
+    }
+  });
+
+  test("ignores external resolutions for unknown requests and unrelated sessions", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionCreateResponse = { data: { id: "ses_resolution_filter" } };
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession({
+      provider: "opencode",
+      cwd: "/workspace/resolution-filter",
+    });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+    const trackedRequestId = "permission_resolution_filter";
+    const barrierRequestId = "permission_resolution_barrier";
+
+    try {
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalRequestAskedEvent({
+          requestId: trackedRequestId,
+          requestKind: "permission",
+          sessionId: "ses_resolution_filter",
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(session.getPendingPermissions()).toContainEqual(
+          expect.objectContaining({ id: trackedRequestId }),
+        ),
+      );
+
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalResolutionEvent({
+          eventId: "unknown-request-resolution",
+          outcome: "permission_once",
+          requestId: "unknown-request",
+          sessionId: "ses_resolution_filter",
+        }),
+      );
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalResolutionEvent({
+          eventId: "unrelated-session-resolution",
+          outcome: "permission_reject",
+          requestId: trackedRequestId,
+          sessionId: "ses_unrelated_resolution",
+        }),
+      );
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalRequestAskedEvent({
+          requestId: barrierRequestId,
+          requestKind: "permission",
+          sessionId: "ses_resolution_filter",
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(session.getPendingPermissions()).toContainEqual(
+          expect.objectContaining({ id: barrierRequestId }),
+        ),
+      );
+
+      expect(session.getPendingPermissions()).toContainEqual(
+        expect.objectContaining({ id: trackedRequestId }),
+      );
+      expect(events.filter((event) => event.type === "permission_resolved")).toEqual([]);
+
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalResolutionEvent({
+          eventId: "tracked-request-resolution",
+          outcome: "permission_once",
+          requestId: trackedRequestId,
+          sessionId: "ses_resolution_filter",
+        }),
+      );
+      openCodeClient.emitEvent(
+        buildOpenCodeExternalResolutionEvent({
+          eventId: "barrier-request-resolution",
+          outcome: "permission_reject",
+          requestId: barrierRequestId,
+          sessionId: "ses_resolution_filter",
+        }),
+      );
+      await vi.waitFor(() => expect(session.getPendingPermissions()).toEqual([]));
+      expect(
+        events.filter(
+          (event) => event.type === "permission_resolved" && event.requestId === trackedRequestId,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      await session.close();
+      await client.shutdown();
+    }
+  });
 
   test("archives an adopted child on the parent's registered OpenCode server", async () => {
     const { runtime, provider, parent, child } = await createAdoptedChildSession();

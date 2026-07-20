@@ -2311,6 +2311,11 @@ function appendOpenCodeLifecycleEvent(
     case "permission.asked":
       appendOpenCodePermissionAsked(event, state, events);
       break;
+    case "permission.replied":
+    case "question.replied":
+    case "question.rejected":
+      appendOpenCodeRequestResolution(event, state, events);
+      break;
     case "question.asked":
       appendOpenCodeQuestionAsked(event, state, events);
       break;
@@ -3426,6 +3431,32 @@ function appendOpenCodeQuestionAsked(
   });
 }
 
+function appendOpenCodeRequestResolution(
+  event: Extract<
+    OpenCodeEvent,
+    { type: "permission.replied" | "question.replied" | "question.rejected" }
+  >,
+  state: OpenCodeEventTranslationState,
+  events: AgentStreamEvent[],
+): void {
+  if (!isOpenCodeSessionTrackedByParent(event.properties.sessionID, state)) {
+    return;
+  }
+  let behavior: AgentPermissionResponse["behavior"] = "allow";
+  if (
+    event.type === "question.rejected" ||
+    (event.type === "permission.replied" && event.properties.reply === "reject")
+  ) {
+    behavior = "deny";
+  }
+  events.push({
+    type: "permission_resolved",
+    provider: "opencode",
+    requestId: event.properties.requestID,
+    resolution: { behavior },
+  });
+}
+
 function appendOpenCodeSessionError(
   event: Extract<OpenCodeEvent, { type: "session.error" }>,
   state: OpenCodeEventTranslationState,
@@ -4440,7 +4471,7 @@ class OpenCodeAgentSession implements AgentSession {
       turnId = this.startExternalDrivenTurn();
     }
     if (!turnId) {
-      this.emitBackgroundPermissionRequests(foregroundEvents);
+      this.emitBackgroundPermissionEvents(foregroundEvents);
       this.traceOpenCode("provider.opencode.event.skip", {
         n: eventCount,
         reason: "no_active_turn",
@@ -4520,9 +4551,9 @@ class OpenCodeAgentSession implements AgentSession {
     }
   }
 
-  private emitBackgroundPermissionRequests(events: readonly AgentStreamEvent[]): void {
+  private emitBackgroundPermissionEvents(events: readonly AgentStreamEvent[]): void {
     for (const event of events) {
-      if (event.type === "permission_requested") {
+      if (event.type === "permission_requested" || event.type === "permission_resolved") {
         this.notifySubscribers(event, null);
       }
     }
@@ -5273,6 +5304,13 @@ class OpenCodeAgentSession implements AgentSession {
         }
         this.pendingPermissions.set(translatedEvent.request.id, translatedEvent.request);
         this.pendingPermissionDirectories.set(translatedEvent.request.id, directory);
+      }
+      if (translatedEvent.type === "permission_resolved") {
+        if (!this.pendingPermissions.has(translatedEvent.requestId)) {
+          continue;
+        }
+        this.pendingPermissions.delete(translatedEvent.requestId);
+        this.pendingPermissionDirectories.delete(translatedEvent.requestId);
       }
       if (translatedEvent.type === "turn_completed") {
         if (hasNormalizedOpenCodeUsage(this.accumulatedUsage)) {
