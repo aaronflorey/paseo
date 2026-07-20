@@ -18,6 +18,11 @@ import { resolveOpenCodeHomeDir } from "./paths.js";
 
 const OPENCODE_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 const OPENCODE_SERVER_FORCE_SHUTDOWN_TIMEOUT_MS = 1_000;
+const OPENCODE_RUNTIME_SETTING_CATEGORIES = [
+  "command",
+  "env",
+  "disallowedTools",
+] as const satisfies ReadonlyArray<keyof ProviderRuntimeSettings>;
 
 export interface OpenCodeServerAcquisition {
   server: { port: number; url: string; generation: object };
@@ -109,11 +114,14 @@ export class OpenCodeServerManager implements OpenCodeServerManagerLike {
       });
       OpenCodeServerManager.registerExitHandler();
     } else if (OpenCodeServerManager.instance.runtimeSettingsKey !== nextSettingsKey) {
+      const existingRuntimeSettings = OpenCodeServerManager.instance.runtimeSettings;
+      const differingRuntimeSettingCategories = OPENCODE_RUNTIME_SETTING_CATEGORIES.filter(
+        (category) =>
+          JSON.stringify(existingRuntimeSettings?.[category]) !==
+          JSON.stringify(runtimeSettings?.[category]),
+      );
       logger.warn(
-        {
-          existingRuntimeSettings: OpenCodeServerManager.instance.runtimeSettingsKey,
-          requestedRuntimeSettings: nextSettingsKey,
-        },
+        { differingRuntimeSettingCategories },
         "OpenCode server manager already initialized with different runtime settings",
       );
     }

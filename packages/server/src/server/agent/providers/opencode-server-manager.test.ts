@@ -21,6 +21,7 @@ import {
   type OpenCodePortAllocator,
   type OpenCodeServerProcessSpawner,
 } from "./opencode/server-manager.js";
+import type { ProviderRuntimeSettings } from "../provider-launch-config.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -345,6 +346,72 @@ describe.runIf(process.platform === "win32")(
     }, 60_000);
   },
 );
+
+describe("OpenCodeServerManager runtime settings", () => {
+  test("logs only differing setting categories when the singleton settings conflict", async () => {
+    const logger = createTestLogger();
+    const warn = vi.spyOn(logger, "warn");
+    const existingCanaries = {
+      command: "existing-command-canary",
+      arg: "existing-arg-canary",
+      env: "existing-env-canary",
+      config: "existing-config-canary",
+      tool: "existing-tool-canary",
+    };
+    const requestedCanaries = {
+      command: "requested-command-canary",
+      arg: "requested-arg-canary",
+      env: "requested-env-canary",
+      config: "requested-config-canary",
+      tool: "requested-tool-canary",
+    };
+    const existingRuntimeSettings: ProviderRuntimeSettings = {
+      command: {
+        mode: "replace",
+        argv: [existingCanaries.command, existingCanaries.arg],
+      },
+      env: {
+        OPENCODE_API_KEY: existingCanaries.env,
+        OPENCODE_CONFIG_CONTENT: existingCanaries.config,
+      },
+      disallowedTools: [existingCanaries.tool],
+    };
+    const requestedRuntimeSettings: ProviderRuntimeSettings = {
+      command: {
+        mode: "replace",
+        argv: [requestedCanaries.command, requestedCanaries.arg],
+      },
+      env: {
+        OPENCODE_API_KEY: requestedCanaries.env,
+        OPENCODE_CONFIG_CONTENT: requestedCanaries.config,
+      },
+      disallowedTools: [requestedCanaries.tool],
+    };
+    const manager = OpenCodeServerManager.getInstance(logger, existingRuntimeSettings);
+
+    try {
+      expect(OpenCodeServerManager.getInstance(logger, existingRuntimeSettings)).toBe(manager);
+      expect(warn).not.toHaveBeenCalled();
+
+      expect(OpenCodeServerManager.getInstance(logger, requestedRuntimeSettings)).toBe(manager);
+
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        { differingRuntimeSettingCategories: ["command", "env", "disallowedTools"] },
+        "OpenCode server manager already initialized with different runtime settings",
+      );
+      const capturedWarning = JSON.stringify(warn.mock.calls);
+      for (const canary of [
+        ...Object.values(existingCanaries),
+        ...Object.values(requestedCanaries),
+      ]) {
+        expect(capturedWarning).not.toContain(canary);
+      }
+    } finally {
+      await manager.shutdown();
+    }
+  });
+});
 
 function createTestManager(
   ports: number[],
