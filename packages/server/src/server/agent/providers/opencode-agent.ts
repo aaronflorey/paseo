@@ -362,9 +362,33 @@ interface OpenCodeProjectMcpConfigState {
 }
 
 const openCodeProjectMcpConfigs = new Map<object, OpenCodeProjectMcpConfigState>();
-const OPENCODE_PROVIDER_LIST_TIMEOUT_MS = 30_000;
+const OPENCODE_CATALOG_PROVIDER_LIST_TIMEOUT_MS = 30_000;
+const OPENCODE_CONTEXT_PROVIDER_LIST_TIMEOUT_MS = 30_000;
+const OPENCODE_AGENT_DISCOVERY_TIMEOUT_MS = 10_000;
 const OPENCODE_METADATA_CONCURRENCY = 4;
 const openCodeMetadataLimit = pLimit(OPENCODE_METADATA_CONCURRENCY);
+
+interface OpenCodeMetadataRequestOptions<T> {
+  request: (signal: AbortSignal) => Promise<T>;
+  timeoutMs: number;
+  timeoutMessage: string;
+}
+
+async function runOpenCodeMetadataRequest<T>(
+  options: OpenCodeMetadataRequestOptions<T>,
+): Promise<T> {
+  const abortController = new AbortController();
+  try {
+    return await withTimeout(
+      options.request(abortController.signal),
+      options.timeoutMs,
+      options.timeoutMessage,
+    );
+  } finally {
+    abortController.abort();
+  }
+}
+
 const OPENCODE_HANDLED_BUILTIN_SLASH_COMMANDS: AgentSlashCommand[] = [
   {
     name: "compact",
@@ -1772,11 +1796,11 @@ export class OpenCodeAgentClient implements AgentClient {
     directory: string,
   ): Promise<AgentModelDefinition[]> {
     const response = await openCodeMetadataLimit(() =>
-      withTimeout(
-        client.provider.list({ directory }),
-        OPENCODE_PROVIDER_LIST_TIMEOUT_MS,
-        `OpenCode provider.list timed out after ${OPENCODE_PROVIDER_LIST_TIMEOUT_MS / 1000}s - server may not be authenticated or connected to any providers`,
-      ),
+      runOpenCodeMetadataRequest({
+        request: (signal) => client.provider.list({ directory }, { signal }),
+        timeoutMs: OPENCODE_CATALOG_PROVIDER_LIST_TIMEOUT_MS,
+        timeoutMessage: `OpenCode provider.list timed out after ${OPENCODE_CATALOG_PROVIDER_LIST_TIMEOUT_MS / 1000}s - server may not be authenticated or connected to any providers`,
+      }),
     );
 
     if (response.error) {
@@ -1829,11 +1853,11 @@ export class OpenCodeAgentClient implements AgentClient {
     directory: string,
   ): Promise<AgentMode[]> {
     const response = await openCodeMetadataLimit(() =>
-      withTimeout(
-        client.app.agents({ directory }),
-        10_000,
-        "OpenCode app.agents timed out after 10s",
-      ),
+      runOpenCodeMetadataRequest({
+        request: (signal) => client.app.agents({ directory }, { signal }),
+        timeoutMs: OPENCODE_AGENT_DISCOVERY_TIMEOUT_MS,
+        timeoutMessage: `OpenCode app.agents timed out after ${OPENCODE_AGENT_DISCOVERY_TIMEOUT_MS / 1000}s during catalog discovery`,
+      }),
     );
 
     if (response.error || !response.data) {
@@ -1858,7 +1882,19 @@ export class OpenCodeAgentClient implements AgentClient {
     client: OpencodeClient,
     cwd: string,
   ): Promise<void> {
-    const response = await openCodeMetadataLimit(() => client.provider.list({ directory: cwd }));
+    const response = await openCodeMetadataLimit(() =>
+      runOpenCodeMetadataRequest({
+        request: (signal) => client.provider.list({ directory: cwd }, { signal }),
+        timeoutMs: OPENCODE_CONTEXT_PROVIDER_LIST_TIMEOUT_MS,
+        timeoutMessage: `OpenCode provider.list timed out after ${OPENCODE_CONTEXT_PROVIDER_LIST_TIMEOUT_MS / 1000}s during model context discovery`,
+      }),
+    ).catch(() => null);
+    if (!response) {
+      this.logger.warn(
+        "OpenCode model context discovery failed; continuing without cached context windows",
+      );
+      return;
+    }
     if (response.error || !response.data) {
       return;
     }
@@ -4654,12 +4690,19 @@ class OpenCodeAgentSession implements AgentSession {
     }
 
     const response = await openCodeMetadataLimit(() =>
-      this.client.app.agents({
-        directory: this.config.cwd,
+      runOpenCodeMetadataRequest({
+        request: (signal) => this.client.app.agents({ directory: this.config.cwd }, { signal }),
+        timeoutMs: OPENCODE_AGENT_DISCOVERY_TIMEOUT_MS,
+        timeoutMessage: `OpenCode app.agents timed out after ${OPENCODE_AGENT_DISCOVERY_TIMEOUT_MS / 1000}s during session mode discovery`,
       }),
-    );
-    const agents = response.error || !response.data ? [] : response.data;
+    ).catch(() => null);
+    if (!response) {
+      this.logger.warn("OpenCode agent discovery failed; continuing without available modes");
+      this.availableModesCache = [];
+      return this.availableModesCache;
+    }
 
+    const agents = response.error || !response.data ? [] : response.data;
     const discoveredModes = agents.filter(isSelectableOpenCodeAgent).map(mapOpenCodeAgentToMode);
 
     this.availableModesCache = mergeOpenCodeModes(discoveredModes);

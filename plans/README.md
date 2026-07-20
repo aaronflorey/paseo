@@ -19,7 +19,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [008](008-bound-close-abort.md)                   | Bound OpenCode abort during close                  | P1       | S      | 006                          | DONE   |
 | [009](009-retain-force-kill-process-record.md)    | Retain unconfirmed managed-process records         | P1       | S      | —                            | DONE   |
 | [010](010-release-mcp-generation-metadata.md)     | Release MCP metadata with helper generations       | P2       | M      | 004                          | DONE   |
-| [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | TODO   |
+| [011](011-timeout-metadata-calls.md)              | Bound metadata calls inside the global limiter     | P1       | M      | —                            | DONE   |
 | [012](012-detect-split-readiness-output.md)       | Detect split helper-readiness output               | P2       | S      | —                            | TODO   |
 | [013](013-handle-external-request-resolution.md)  | Handle external permission and question resolution | P1       | M      | 005, 007                     | TODO   |
 | [014](014-run-invalid-model-regression.md)        | Put invalid-model coverage in the CLI runner       | P2       | M      | —                            | TODO   |

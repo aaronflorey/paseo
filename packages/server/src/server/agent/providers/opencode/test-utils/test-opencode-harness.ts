@@ -8,6 +8,15 @@ interface OpenCodeResponse {
   error?: unknown;
 }
 
+interface OpenCodeRequestOptions {
+  signal?: AbortSignal;
+}
+
+type OpenCodeRequestImplementation = (
+  parameters: unknown,
+  options?: OpenCodeRequestOptions,
+) => Promise<OpenCodeResponse>;
+
 let nextTestOpenCodePort = 12_340;
 
 export class TestOpenCodeHarness implements OpenCodeServerManagerLike {
@@ -137,6 +146,7 @@ export class TestOpenCodeClient {
   };
 
   appAgentsResponse: OpenCodeResponse = { data: [] };
+  appAgentsImplementation: OpenCodeRequestImplementation | null = null;
   commandListResponse: OpenCodeResponse = { data: [] };
   eventStream: AsyncIterable<unknown>;
   experimentalSessionListResponse: OpenCodeResponse = { data: [] };
@@ -145,7 +155,7 @@ export class TestOpenCodeClient {
   mcpConnectResponse: OpenCodeResponse = {};
   permissionReplyResponse: OpenCodeResponse = {};
   providerListResponse: OpenCodeResponse = { data: { connected: [], all: [] } };
-  providerListImplementation: (() => Promise<OpenCodeResponse>) | null = null;
+  providerListImplementation: OpenCodeRequestImplementation | null = null;
   questionRejectResponse: OpenCodeResponse = {};
   questionReplyResponse: OpenCodeResponse = {};
   sessionAbortResponse: OpenCodeResponse = {};
@@ -190,9 +200,11 @@ export class TestOpenCodeClient {
   asSdkClient(): OpencodeClient {
     return {
       app: {
-        agents: async (parameters: unknown) => {
+        agents: async (parameters: unknown, options?: OpenCodeRequestOptions) => {
           this.calls.appAgents.push(parameters);
-          return this.appAgentsResponse;
+          return this.appAgentsImplementation
+            ? await this.appAgentsImplementation(parameters, options)
+            : this.appAgentsResponse;
         },
       },
       command: {
@@ -247,10 +259,10 @@ export class TestOpenCodeClient {
         },
       },
       provider: {
-        list: async (parameters: unknown) => {
+        list: async (parameters: unknown, options?: OpenCodeRequestOptions) => {
           this.calls.providerList.push(parameters);
           return this.providerListImplementation
-            ? await this.providerListImplementation()
+            ? await this.providerListImplementation(parameters, options)
             : this.providerListResponse;
         },
       },
