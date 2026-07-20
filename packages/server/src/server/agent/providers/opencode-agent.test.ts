@@ -3088,6 +3088,98 @@ describe("OpenCode provider subagent contract", () => {
     await parent.close();
   });
 
+  test("keeps session resources until a child auto-approval callback drains", async () => {
+    const runtime = new TestOpenCodeHarness();
+    const parentClient = new TestOpenCodeClient();
+    parentClient.sessionCreateResponse = { data: { id: "ses_parent_callback_drain" } };
+    const replyStarted = createTestDeferred<void>();
+    const releaseReply = createTestDeferred<void>();
+    const sdkClient = parentClient.asSdkClient();
+    Object.assign(sdkClient.permission, {
+      reply: vi.fn(async (parameters: unknown) => {
+        parentClient.calls.permissionReply.push(parameters);
+        replyStarted.resolve();
+        await releaseReply.promise;
+        return {};
+      }),
+    });
+    const client = new OpenCodeAgentClient(createTestLogger(), undefined, {
+      serverManager: runtime,
+      createClient: () => sdkClient,
+    });
+    const parent = await client.createSession(
+      {
+        provider: "opencode",
+        cwd: "/workspace/root",
+        featureValues: { auto_accept: true },
+      },
+      { env: { PASEO_AGENT_ID: "parent-agent" } },
+    );
+    const events: AgentStreamEvent[] = [];
+    parent.subscribe((event) => events.push(event));
+
+    parentClient.emitEvent({
+      type: "session.created",
+      properties: {
+        info: {
+          id: "ses_child_callback_drain",
+          parentID: "ses_parent_callback_drain",
+          title: "Callback drain child",
+          directory: "/workspace/child",
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(openCodeSessionContextRegistry.resolve("ses_child_callback_drain")).toMatchObject({
+        env: { PASEO_AGENT_ID: "parent-agent" },
+      }),
+    );
+    parentClient.emitEvent({
+      type: "permission.asked",
+      properties: {
+        id: "perm_child_callback_drain",
+        sessionID: "ses_child_callback_drain",
+        permission: "bash",
+        patterns: ["npm test"],
+        metadata: { command: "npm test" },
+      },
+    });
+    await replyStarted.promise;
+    parentClient.emitEvent({
+      type: "session.deleted",
+      properties: { sessionID: "ses_child_callback_drain" },
+    });
+
+    let closeSettled = false;
+    const closePromise = parent.close().then(() => {
+      closeSettled = true;
+      return undefined;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closeSettled).toBe(false);
+    expect(runtime.acquisitions[0]?.releaseCount).toBe(0);
+    expect(openCodeSessionContextRegistry.resolve("ses_parent_callback_drain")).toBeDefined();
+    expect(openCodeSessionContextRegistry.resolve("ses_child_callback_drain")).toBeDefined();
+
+    releaseReply.resolve();
+    await closePromise;
+
+    expect(runtime.acquisitions[0]?.releaseCount).toBe(1);
+    expect(openCodeSessionContextRegistry.resolve("ses_parent_callback_drain")).toBeUndefined();
+    expect(openCodeSessionContextRegistry.resolve("ses_child_callback_drain")).toBeUndefined();
+    expect(parentClient.calls.permissionReply).toEqual([
+      expect.objectContaining({
+        requestID: "perm_child_callback_drain",
+        directory: "/workspace/child",
+      }),
+    ]);
+    expect(events).not.toContainEqual({
+      type: "provider_subagent",
+      provider: "opencode",
+      event: { type: "remove", id: "ses_child_callback_drain" },
+    });
+  });
+
   test("forwards provider child questions through the parent session", async () => {
     const runtime = new TestOpenCodeHarness();
     const parentClient = new TestOpenCodeClient();

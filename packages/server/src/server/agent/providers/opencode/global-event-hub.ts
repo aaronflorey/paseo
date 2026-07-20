@@ -30,6 +30,9 @@ interface OpenCodeGlobalEventListener {
   closed: boolean;
   eventChain: Promise<void>;
   pendingEvents: number;
+  completionPromise: Promise<void> | null;
+  teardownPromise: Promise<void> | null;
+  terminalFailure: { error: unknown } | null;
   acceptsEvent: (rawEvent: unknown) => boolean;
   onEvent: (rawEvent: unknown, eventCount: number) => Promise<void>;
   onEnd: (error: unknown) => Promise<void> | void;
@@ -64,6 +67,9 @@ class OpenCodeGlobalEventGeneration {
       closed: false,
       eventChain: Promise.resolve(),
       pendingEvents: 0,
+      completionPromise: null,
+      teardownPromise: null,
+      terminalFailure: null,
       acceptsEvent: options.acceptsEvent ?? (() => true),
       onEvent: options.onEvent,
       onEnd: options.onEnd,
@@ -75,25 +81,12 @@ class OpenCodeGlobalEventGeneration {
     return {
       ready: listener.ready.promise,
       done: listener.done.promise,
-      close: async () => {
-        if (listener.closed) {
-          return listener.done.promise;
-        }
-        listener.closed = true;
-        this.listeners.delete(listener);
-        listener.ready.resolve();
-        if (this.listeners.size === 0) {
-          this.abortController.abort();
-          await this.finished.promise;
-        }
-        listener.done.resolve();
-        await listener.done.promise;
-      },
+      close: () => this.endListener(listener),
     };
   }
 
   private async run(): Promise<void> {
-    let terminalError: unknown = null;
+    let terminalFailure: { error: unknown } | null = null;
     try {
       const result = await this.client.global.event({
         signal: this.abortController.signal,
@@ -116,13 +109,15 @@ class OpenCodeGlobalEventGeneration {
       }
       await Promise.all(Array.from(this.listeners, (listener) => listener.eventChain));
       if (!this.abortController.signal.aborted) {
-        terminalError = new Error(
-          "OpenCode event stream ended before the session reached a terminal state",
-        );
+        terminalFailure = {
+          error: new Error(
+            "OpenCode event stream ended before the session reached a terminal state",
+          ),
+        };
       }
     } catch (error) {
       if (!this.abortController.signal.aborted) {
-        terminalError = error;
+        terminalFailure = { error };
       }
     } finally {
       this.closed = true;
@@ -130,9 +125,10 @@ class OpenCodeGlobalEventGeneration {
       this.listeners.clear();
       try {
         await Promise.all(
-          listeners.map((listener) =>
-            this.endListener(listener, terminalError).catch(() => undefined),
-          ),
+          listeners.map((listener) => {
+            void this.endListener(listener, terminalFailure);
+            return listener.teardownPromise?.catch(() => undefined);
+          }),
         );
       } finally {
         this.onClosed();
@@ -154,24 +150,15 @@ class OpenCodeGlobalEventGeneration {
         return;
       }
     } catch (error) {
-      this.listeners.delete(listener);
-      void this.endListener(listener, error);
-      if (this.listeners.size === 0) {
-        this.abortController.abort();
-      }
+      void this.endListener(listener, { error });
       return;
     }
     if (listener.pendingEvents >= OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT) {
-      this.listeners.delete(listener);
-      void this.endListener(
-        listener,
-        new Error(
+      void this.endListener(listener, {
+        error: new Error(
           `OpenCode event subscriber exceeded the ${OPENCODE_GLOBAL_EVENT_LISTENER_BACKLOG_LIMIT}-event backlog limit`,
         ),
-      );
-      if (this.listeners.size === 0) {
-        this.abortController.abort();
-      }
+      });
       return;
     }
 
@@ -194,36 +181,61 @@ class OpenCodeGlobalEventGeneration {
     try {
       await listener.onEvent(rawEvent, eventCount);
     } catch (error) {
-      this.listeners.delete(listener);
-      await this.endListener(listener, error);
-      if (this.listeners.size === 0) {
-        this.abortController.abort();
-      }
+      // Do not await teardown from inside eventChain: finalization drains this
+      // same chain after the failing callback returns.
+      void this.endListener(listener, { error });
     }
   }
 
-  private async endListener(listener: OpenCodeGlobalEventListener, error: unknown): Promise<void> {
-    if (listener.closed) {
-      return;
+  private endListener(
+    listener: OpenCodeGlobalEventListener,
+    terminalFailure: { error: unknown } | null = null,
+  ): Promise<void> {
+    if (terminalFailure && !listener.terminalFailure) {
+      listener.terminalFailure = terminalFailure;
     }
+    if (listener.completionPromise) {
+      return listener.completionPromise;
+    }
+
     listener.closed = true;
-    if (!this.ready && error) {
-      listener.ready.reject(error);
-    } else {
-      listener.ready.resolve();
+    this.listeners.delete(listener);
+    const endsGeneration = this.listeners.size === 0;
+    if (endsGeneration && !this.abortController.signal.aborted) {
+      this.closed = true;
+      this.abortController.abort();
     }
-    if (error) {
-      try {
-        await listener.onEnd(error);
-      } catch {
-        // A subscriber's teardown must not terminate the shared stream for the
-        // remaining OpenCode sessions.
-      } finally {
-        listener.done.resolve();
-      }
-      return;
-    }
-    listener.done.resolve();
+
+    const teardownPromise = listener.eventChain
+      .catch(() => undefined)
+      .then(async () => {
+        const failure = listener.terminalFailure;
+        if (!this.ready && failure) {
+          listener.ready.reject(failure.error);
+        } else {
+          listener.ready.resolve();
+        }
+        if (failure) {
+          try {
+            await listener.onEnd(failure.error);
+          } catch {
+            // A subscriber's teardown must not terminate the shared stream for
+            // the remaining OpenCode sessions.
+          }
+        }
+        return undefined;
+      });
+    listener.teardownPromise = teardownPromise;
+    const completionPromise = (
+      endsGeneration
+        ? Promise.all([teardownPromise, this.finished.promise]).then(() => undefined)
+        : teardownPromise
+    ).then(() => {
+      listener.done.resolve();
+      return undefined;
+    });
+    listener.completionPromise = completionPromise;
+    return completionPromise;
   }
 }
 

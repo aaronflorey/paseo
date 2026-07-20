@@ -14,7 +14,7 @@ only the targeted tests named by the plan, and update its row when done.
 | [003](003-reject-conflicting-runtime-settings.md) | Reject conflicting OpenCode helper settings        | P1       | M      | 001, 002                     | DONE   |
 | [004](004-share-project-lease-coordinator.md)     | Share project leases across OpenCode clients       | P1       | M      | —                            | DONE   |
 | [005](005-lease-child-session-directories.md)     | Lease child-session operations by directory        | P1       | L      | 004                          | DONE   |
-| [006](006-drain-event-callbacks.md)               | Drain in-flight global-event callbacks             | P1       | M      | —                            | TODO   |
+| [006](006-drain-event-callbacks.md)               | Drain in-flight global-event callbacks             | P1       | M      | —                            | DONE   |
 | [007](007-reconnect-global-event-streams.md)      | Reconnect dead global event streams                | P1       | L      | 006                          | TODO   |
 | [008](008-bound-close-abort.md)                   | Bound OpenCode abort during close                  | P1       | S      | 006                          | TODO   |
 | [009](009-retain-force-kill-process-record.md)    | Retain unconfirmed managed-process records         | P1       | S      | —                            | TODO   |
