@@ -1,7 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentHooksAreInstalled,
   installAgentHooks,
@@ -12,8 +13,54 @@ import { opencodeAgentHookProvider } from "./opencode.js";
 import { OPENCODE_PLUGIN_SOURCE } from "./opencode-plugin.js";
 
 const temporaryDirs: string[] = [];
+const originalTerminalId = process.env.PASEO_TERMINAL_ID;
+const globalWithBun = globalThis as typeof globalThis & { Bun?: BunStub };
+const originalBun = globalWithBun.Bun;
+let moduleSequence = 0;
+
+interface SpawnOptions {
+  stdin: "ignore";
+  stdout: "ignore";
+  stderr: "ignore";
+}
+
+interface BunStub {
+  spawn: (argv: string[], options: SpawnOptions) => { exited: Promise<unknown> };
+}
+
+interface TerminalActivityHooks {
+  event: (input: { event: unknown }) => Promise<void>;
+}
+
+function setTerminalId(value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env.PASEO_TERMINAL_ID;
+    return;
+  }
+  process.env.PASEO_TERMINAL_ID = value;
+}
+
+async function loadTerminalActivityHooks(): Promise<TerminalActivityHooks> {
+  const directory = createTempDir("paseo-opencode-plugin-module-");
+  const modulePath = join(directory, `terminal-activity-${moduleSequence}.mjs`);
+  moduleSequence += 1;
+  writeFileSync(modulePath, OPENCODE_PLUGIN_SOURCE, "utf8");
+  const moduleUrl = `${pathToFileURL(modulePath).href}?test=${moduleSequence}`;
+  const imported = (await import(moduleUrl)) as { default?: unknown };
+  if (typeof imported.default !== "function") {
+    throw new Error("Generated terminal-activity plugin did not export its factory");
+  }
+  return (await imported.default()) as TerminalActivityHooks;
+}
 
 afterEach(() => {
+  setTerminalId(originalTerminalId);
+  if (originalBun === undefined) {
+    delete globalWithBun.Bun;
+  } else {
+    globalWithBun.Bun = originalBun;
+  }
+  vi.restoreAllMocks();
   while (temporaryDirs.length > 0) {
     const dir = temporaryDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -119,5 +166,91 @@ describe("OpenCode terminal agent hooks", () => {
         input: { read: async () => null },
       }),
     ).resolves.toBe(state);
+  });
+});
+
+describe.sequential("generated OpenCode terminal-activity plugin", () => {
+  it("imports exact source and spawns one ignored-stdio hook per mapped event", async () => {
+    setTerminalId("terminal-1");
+    const spawn = vi
+      .fn<BunStub["spawn"]>()
+      .mockImplementation(() => ({ exited: Promise.resolve(0) }));
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+    expect(Object.keys(hooks)).toEqual(["event"]);
+
+    const mappedEvents = [
+      [{ type: "session.status", properties: { status: { type: "busy" } } }, "session.status.busy"],
+      [
+        { type: "session.status", properties: { status: { type: "retry" } } },
+        "session.status.retry",
+      ],
+      [{ type: "session.status", properties: { status: { type: "idle" } } }, "session.status.idle"],
+      [{ type: "permission.asked" }, "permission.asked"],
+      [{ type: "permission.replied" }, "permission.replied"],
+    ] as const;
+
+    for (const [event] of mappedEvents) {
+      await hooks.event({ event });
+    }
+
+    const spawnOptions: SpawnOptions = {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    };
+    expect(spawn.mock.calls).toEqual(
+      mappedEvents.map(([, event]) => [["paseo", "hooks", "opencode", event], spawnOptions]),
+    );
+  });
+
+  it("does not spawn without a terminal ID or for unmapped events", async () => {
+    const spawn = vi
+      .fn<BunStub["spawn"]>()
+      .mockImplementation(() => ({ exited: Promise.resolve(0) }));
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+
+    delete process.env.PASEO_TERMINAL_ID;
+    await hooks.event({
+      event: { type: "session.status", properties: { status: { type: "busy" } } },
+    });
+
+    setTerminalId("terminal-1");
+    for (const event of [
+      { type: "session.status", properties: { status: { type: "unknown" } } },
+      { type: "permission.rejected" },
+      { type: "server.connected" },
+      null,
+    ]) {
+      await hooks.event({ event });
+    }
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("swallows synchronous spawn failures", async () => {
+    setTerminalId("terminal-1");
+    const spawn = vi.fn<BunStub["spawn"]>(() => {
+      throw new Error("spawn unavailable");
+    });
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+
+    await expect(hooks.event({ event: { type: "permission.asked" } })).resolves.toBeUndefined();
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("swallows asynchronous child-exit failures", async () => {
+    setTerminalId("terminal-1");
+    const spawn = vi
+      .fn<BunStub["spawn"]>()
+      .mockImplementation(() => ({ exited: Promise.reject(new Error("child failed")) }));
+    globalWithBun.Bun = { spawn };
+    const hooks = await loadTerminalActivityHooks();
+
+    await expect(hooks.event({ event: { type: "permission.replied" } })).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 });
